@@ -217,7 +217,7 @@ All `LlmClient` instances are created centrally in `Penny.__init__()` and shared
   - `thoughts` — inner-monologue producer (migration 0068): picks a random like, browses, drafts a thought, dedups against itself, writes (`published=true`, so the `notifier` delivers each new one; `inclusion=relevant`, so past thoughts surface in chat). Replaces the old `unnotified-thoughts` → `notified-thoughts` move-drain pair (5400s)
   - `skills` — reusable, topic-agnostic workflow patterns the chat agent follows (TRIGGER + STEPS entries surfaced via recall). **Grounded in the real collections that exist** (migration 0069): each cycle the collector calls `collection_catalog` (every user-built collection's intent + extraction_prompt, framework collectors hidden), distils the *kind* behind each, and reconciles against the existing skills — leaving a skill that already covers the kind, folding a *generalizable* recipe improvement into the matching skill's embedded extraction_prompt template (e.g. a collection that grew a "cross-check a reference source" step), but leaving collection-specific quirks (a tag prefix, a skipped media type) in that collection's own prompt, and never deleting. Replaces the old chat-reading loop that minted one-off skills from corrections that never recall-matched. Operate-the-system skills (archive/cadence/flip/scope/one-shot) have no source collection, so the loop never touches them; build-pattern skills (research-notify/silent) refine in place as collections drift. **A skill is always a positive recipe — a TRIGGER (the intent + example phrasings) and numbered tool-call STEPS — never a negative prohibition.** "Don't do X" warnings tied to a since-removed structure (e.g. "don't add a send_message step") are dead weight: the model has no memory of the old structure to need warning against, and the positive form (set `published: true`) already says everything. Migration 0069 rewrote the seeded skills into this one clean shape (21600s)
   - `notifier` — pub/sub consumer (migration 0067): each cycle `read_published_latest(n=1)` returns the oldest unseen entry across every `published` collection, grounds it in `penny-messages`/`user-messages`, and `send_message`s it once; the cursor (not a move) guarantees once-only, so the source stays a durable library. Mirrors the former `notified-thoughts` compose flow minus the move (600s ≈ the send cooldown). Its prompt is byte-identical to the eval's `notifier-delivers-published` contract.
-  - `quality` — self-correcting collector (migration 0055, prompt refined through 0063, run-health flags added 0072): reviews recent runs via `log_read("collector-runs")` — a **read facade over `promptlog`** that renders each run as a record (`[target] summary` header + structural run-health `⚠` flags + the run's tool trace incl. `done()`). The record is produced by the **shared `render_run_record`/`classify_run`** (in `database/memory/objects.py`) — the *same* representation the addon's prompts tab reads (so what we use to judge a run and what Penny sees of it are one thing). `classify_run` flags four failure modes structurally from stored data: `bailed` (`⚠ NO WORK DONE` — reached `done()`/no tool call without any read/write/browse), `incomplete` (`⚠ INCOMPLETE` — hit the step ceiling), `tool_failures` (`⚠ TOOL FAILURES (n)` — from the persisted `promptlog.tool_failures` count), `degenerate_send` (`⚠ HALF-FORMED SEND` — a `send_message` with no real content, via `_similarity.degenerate_reason`/`is_unfinished_fragment`). Quality judges each run on two tiers: **tier 0** — did the collector follow its instructions at all? a `⚠ NO WORK DONE` bail is a regression; **tier 1** — for runs that executed, does the behaviour match the collection's `intent` (incl. a `⚠ HALF-FORMED SEND`)? `⚠ INCOMPLETE`/`⚠ TOOL FAILURES` and a `❌`/`💤` run that called real tools are capacity/transience — surfaced but IGNORED (never a rewrite). It rewrites whichever `extraction_prompt` failed (always as a numbered recipe), applies it **directly** with `collection_update`, then messages the user (apply-then-notify). (3600s base, auto-throttles toward the weekly cap on quiet cycles like any other collector)
+  - `quality` — self-correcting collector (migration 0055, prompt refined through 0063, run-health flags added 0072, **suggest-not-apply from 0073**): reviews recent runs via `log_read("collector-runs")` — a **read facade over `promptlog`** that renders each run as a record (`[target] summary` header + a structural I/O counts line (`browses: A ok, B failed · reads · writes · sends`) + run-health `⚠` flags + the run's tool trace incl. `done()`). The record is produced by the **shared `render_run_record`/`classify_run`** (in `database/memory/objects.py`) — the *same* representation the addon's prompts tab reads (so what we use to judge a run and what Penny sees of it are one thing). `classify_run` flags five failure modes structurally from stored data: `bailed` (`⚠ NO WORK DONE` — reached `done()`/no tool call without any read/write/browse), `no_writes` (`⚠ NO WRITES` — a browse failed AND the run wrote nothing; the fruitless-run signal, derived from the rendered `## browse error:` headers since `BrowseTool` returns `success=True` on partial failure), `incomplete` (`⚠ INCOMPLETE` — hit the step ceiling), `tool_failures` (`⚠ TOOL FAILURES (n)` — from the persisted `promptlog.tool_failures` count), `degenerate_send` (`⚠ HALF-FORMED SEND` — a `send_message` with no real content, via `_similarity.degenerate_reason`/`is_unfinished_fragment`). Quality judges each run on two tiers: **tier 0** — did the collector follow its instructions at all? a `⚠ NO WORK DONE` bail is a regression; **tier 1** — for runs that executed, does the behaviour match the collection's `intent` (incl. a `⚠ HALF-FORMED SEND`, a `collector_run_history`-confirmed persistent `⚠ NO WRITES`, or a flag-less behaviour drift like a repeated/off-intent send)? `⚠ INCOMPLETE`/`⚠ TOOL FAILURES` and a `❌`/`💤` run that called real tools are capacity/transience — surfaced but IGNORED (never a fix). Before acting it reads the suspect collector's recent runs with **`collector_run_history(<collection>)`** to tell a one-off from a persistent pattern. **It SUGGESTS, never applies**: on confirmed drift it `send_message`s the user a three-part proposal (Observed / Proposed fix / a complete rewritten `extraction_prompt` as a numbered recipe) and calls **no `collection_update`** — the user approves and the chat agent makes the edit. Enforcement is prompt-only (the tool surface stays uniform across collectors); the eval (`tests/eval/test_quality_correction.py`, which asserts a suggestion was sent AND nothing was mutated) is the standing gate. (3600s base, auto-throttles toward the weekly cap on quiet cycles like any other collector)
 - User-defined collections created via chat (`/collection_create` with an `extraction_prompt`) are picked up automatically on the next tick — no restart required.
 - Tool surface: reads (unrestricted — including `collection_catalog`, which lists every user-built collection's description/intent/published/extraction_prompt, hiding logs + the framework collectors in `PennyConstants.SYSTEM_COLLECTIONS`; this is what the `skills` loop reads to reground on real collections) + entry mutations (`collection_write`, `update_entry`, `collection_delete_entry`) pinned to the bound target via the `_memory_scope()` hook + `log_append` + `send_message` (when channel wired) + browse + done — uniform across every collection, including `quality`. (An earlier `prompt_test` dry-run tool, given only to `quality`, was removed: gpt-oss couldn't reliably drive the dry-run → revise → apply loop — it would emit the revised prompt as text instead of a tool call and the cycle died without applying — so quality now rewrites directly and the next cycle re-checks. See `docs/self-improvement-loop.md`.)
 - Cadence: `COLLECTOR_TICK_INTERVAL` (default 30s, idle-gated) drives the dispatcher; per-collection `collector_interval_seconds` controls each collection's pacing within that.
@@ -522,20 +522,44 @@ real chat/collector loops and score persisted DB state + sends at a `pass_rate`
 threshold (`min_pass_rate=None` = report-only). The coverage matrix is the two
 agent shapes × answer-from-memory vs. browse-and-reason: `test_chat_response.py`,
 `test_collection_lifecycle.py`, `test_extractors.py`, `test_skills_extractor.py`,
-`test_quality_correction.py`, `test_retrieval.py`, `test_peripheral.py`. Browse is
-stubbed; a case injects realistic pages via the `browse=` kwarg (query-aware
-`install_browse` / `CannedPage` in `conftest.py`) to score multi-step tool
-reasoning. See `docs/self-improvement-loop.md`.
+`test_quality_correction.py`, `test_collector_honesty.py`, `test_retrieval.py`,
+`test_peripheral.py`. Browse is stubbed; a case injects realistic pages via the
+`browse=` kwarg (query-aware `install_browse` / `CannedPage` in `conftest.py`) to
+score multi-step tool reasoning. A `CannedPage(fails=True)` makes a matched read
+*error* (renders `## browse error:` without the real retry backoff), and the
+shared `ALL_BROWSES_FAIL` catch-all makes every source unreachable — the way to
+exercise read-failure honesty (a cycle that browsed a lot, read nothing, and must
+not confabulate a write/success at `done()`). See `docs/self-improvement-loop.md`.
 
-#### Every model-facing change ships a durable eval contract (do this last, before landing)
+#### Every model-facing change ships a durable eval contract — validated per change, not batched
 
 Any change that alters how the model behaves — a prompt/`extraction_prompt` edit,
 a tool description, a loop/nudge/retry/validation mechanism, a tool-surface
-change — **must land with a `tests/eval/` case that encodes the behaviour it
-establishes or fixes.** The eval suite is both the regression net (a future
-prompt tweak can't silently undo it) and the *written contract* for what we
-expect the model to do. A model-facing change without an eval contract is
+change, **or a change to what the model READS** (how a run record, tool result,
+or recall block is rendered) — **must land with a `tests/eval/` case that encodes
+the behaviour it establishes or fixes.** The eval suite is both the regression net
+(a future prompt tweak can't silently undo it) and the *written contract* for what
+we expect the model to do. A model-facing change without an eval contract is
 incomplete — the next change will regress it and nothing will catch it.
+
+**Validate each change as you build it, not in one batch at the end.** A multi-part
+change (e.g. honest-`done()` guidance, then a structural counts line, then a flag the
+self-review reads) is several independent asks of the model — each needs its own
+`make eval` gate *as it lands*, because a single eval at the end can't tell you *which*
+lever the model did or didn't understand. Shipping the code first and "evaluating later"
+has shipped levers here that the model ignored (a phase-1 `done()` guidance scored 0/3
+until its wording was sharpened — measurable only because it was eval'd on its own, with
+a no-change baseline to beat). Run a **baseline first** when you can (the change vs. its
+absence) so the eval shows the lever is load-bearing, not just that the case passes.
+
+**Changes to what the model reads get a NON-REGRESSION eval against the EXISTING cases.**
+A rendering change (a new line/flag in the run record the `quality` collector reads) is
+an input shift to every consumer of that surface, even though it edits no prompt. It
+ships green only after the existing cases that read that surface (`test_quality_correction.py`)
+are re-run on the branch and shown to still hold — the new signal must not flip a
+leave-alone case into a spurious rewrite, nor mute a corrective one. The shared
+`render_run_record` is read by both the collector prompts and the addon, so one rendering
+edit moves both; the existing suite is the proof it didn't regress them.
 
 **Authoring a case is not running it.** Every prompt change must be *dry-run through
 the harness against the live model* (`make eval` / a focused case) and the result read
