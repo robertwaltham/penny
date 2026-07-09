@@ -15,7 +15,7 @@ import json
 import os
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -73,6 +73,7 @@ class Check:
 
     label: str
     ok: bool
+    anchor: str | None = None  # substring of the transcript row this check marks (None = no row)
 
 
 @dataclass
@@ -87,6 +88,7 @@ class SampleResult:
     score: float
     failed: list[str]
     total: int = 1
+    checks: list[Check] = field(default_factory=list)  # full graded checks (empty = binary)
 
     @property
     def passed(self) -> bool:
@@ -101,7 +103,9 @@ class SampleResult:
         if not checks:
             return cls(1.0, [], 1)
         passed = sum(1 for check in checks if check.ok)
-        return cls(passed / len(checks), [c.label for c in checks if not c.ok], len(checks))
+        return cls(
+            passed / len(checks), [c.label for c in checks if not c.ok], len(checks), list(checks)
+        )
 
 
 @dataclass
@@ -627,6 +631,46 @@ def _sample_turns(rows: list[PromptLog], reply: str) -> list[tuple[str, str]]:
     return turns
 
 
+def _anchor_hits(needle: str, content: str) -> bool:
+    """Does this tool-call row satisfy the anchor? A tool-name anchor (``memory_metadata(``)
+    matches that call; a keyword anchor (``designer``, ``"published": false``) must live inside
+    a ``collection_update`` call — the row that made the edit — never another tool's reasoning
+    field that merely mentions the word."""
+    if needle.endswith("("):
+        return needle in content
+    return "collection_update(" in content and needle in content
+
+
+def _place_checks(
+    checks: list[Check], turns: list[tuple[str, str]]
+) -> tuple[dict[int, str], list[Check]]:
+    """Bind each anchored check to the FIRST turn whose content contains its anchor.
+
+    Returns ``(turn_index -> concatenated ✅/❌ marks, leftover checks)``.  A check with no
+    anchor — or whose anchor matches no turn (a *missing* expected action, a tool call that
+    never happened) — has no row to sit on, so it falls to ``leftover`` (a footer) rather
+    than being hidden."""
+    marks: dict[int, str] = {}
+    leftover: list[Check] = []
+    for check in checks:
+        needle = (check.anchor or "").lower()
+        hit = None
+        if needle:  # match only Penny's tool-call rows — never the user turn that named the word
+            hit = next(
+                (
+                    i
+                    for i, (actor, content) in enumerate(turns)
+                    if actor == _ACTOR["call"] and _anchor_hits(needle, content.lower())
+                ),
+                None,
+            )
+        if hit is None:
+            leftover.append(check)
+        else:
+            marks[hit] = marks.get(hit, "") + ("✅" if check.ok else "❌")
+    return marks, leftover
+
+
 def _write_sample_report(
     db: Database, case_id: str, sample_index: int, *, result: SampleResult, reply: str = ""
 ) -> None:
@@ -653,11 +697,15 @@ def _write_sample_report(
         "| # | Actor | Content |",
         "|---|---|---|",
     ]
-    lines += [
-        f"| {index} | {actor} | {_report_cell(content)} |"
-        for index, (actor, content) in enumerate(_sample_turns(rows, reply), start=1)
-    ]
-    if result.failed:
+    turns = _sample_turns(rows, reply)
+    marks, leftover = _place_checks(result.checks, turns)  # ✅/❌ onto the row each check tests
+    for index, (actor, content) in enumerate(turns, start=1):
+        mark = f" {marks[index - 1]}" if index - 1 in marks else ""
+        lines.append(f"| {index} | {actor}{mark} | {_report_cell(content)} |")
+    if result.checks and leftover:  # checks with no single row (whole-run / missing action)
+        legend = " · ".join(f"{'✅' if check.ok else '❌'} {check.label}" for check in leftover)
+        lines += ["", f"_whole-run / missing-action checks: {legend}_"]
+    elif not result.checks and result.failed:  # binary sample: the failure reasons
         lines += ["", f"**Failed:** {'; '.join(result.failed)}"]
     directory = Path(report_dir)
     directory.mkdir(parents=True, exist_ok=True)
