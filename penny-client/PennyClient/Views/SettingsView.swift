@@ -4,6 +4,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var viewModel: SettingsViewModel
     @State private var selectedHistoryChannels = Set(HistoryChannel.allCases.map(\.rawValue))
+    @State private var includeHistoryAttachments = true
     @State private var isShowingDeleteMessagesConfirmation = false
 
     init(client: PennyWebSocketClient) {
@@ -60,22 +61,31 @@ struct SettingsView: View {
                         .disabled(viewModel.client.historySyncing)
                     }
 
-                    LabeledContent("Messages synced", value: "\(viewModel.client.historySyncedCount)")
-                    Text(viewModel.client.historyStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Toggle("Include attachments", isOn: $includeHistoryAttachments)
+                        .disabled(viewModel.client.historySyncing)
 
-                    Button {
-                        viewModel.startHistorySync(channelTypes: Array(selectedHistoryChannels).sorted())
-                    } label: {
-                        Label(
-                            viewModel.client.historySyncing ? "Syncing History" : "Sync History",
-                            systemImage: viewModel.client.historySyncing
-                                ? "arrow.triangle.2.circlepath"
-                                : "clock.arrow.circlepath"
-                        )
+                    LabeledContent("History sync", value: viewModel.client.historyProgressText)
+
+                    HStack {
+                        Button {
+                            viewModel.startHistorySync(
+                                channelTypes: Array(selectedHistoryChannels).sorted(),
+                                includeAttachments: includeHistoryAttachments
+                            )
+                        } label: {
+                            Label(
+                                viewModel.client.historySyncing ? "Syncing History" : "Sync History",
+                                systemImage: viewModel.client.historySyncing
+                                    ? "arrow.triangle.2.circlepath"
+                                    : "clock.arrow.circlepath"
+                            )
+                        }
+                        .disabled(selectedHistoryChannels.isEmpty || viewModel.client.historySyncing)
+                        Spacer()
+                        Text(viewModel.client.historyStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .disabled(selectedHistoryChannels.isEmpty || viewModel.client.historySyncing)
                 }
 
                 #if DEBUG

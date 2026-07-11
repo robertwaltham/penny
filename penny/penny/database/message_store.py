@@ -282,6 +282,14 @@ class MessageStore:
         with self._session() as session:
             return session.get(MessageLog, message_id)
 
+    def get_by_ids(self, message_ids: set[int]) -> dict[int, MessageLog]:
+        """Get multiple messages in one query, keyed by database ID."""
+        if not message_ids:
+            return {}
+        with self._session() as session:
+            messages = session.exec(select(MessageLog).where(MessageLog.id.in_(message_ids))).all()
+            return {message.id: message for message in messages if message.id is not None}
+
     def find_by_external_id(self, external_id: str) -> MessageLog | None:
         """Find a message by its platform-specific external ID."""
         with self._session() as session:
@@ -548,6 +556,40 @@ class MessageStore:
                     outbox = outbox_by_id.get(int(message.external_id))
                 resolved.append((message, device, outbox))
             return resolved, has_more
+
+    def ios_history_count(self, *, channel_types: list[str] | None) -> int:
+        """Count eligible history rows once at the start of an iOS sync."""
+        with self._session() as session:
+            message_columns = MessageLog.__table__.c
+            devices = list(session.exec(select(Device)).all())
+            if channel_types:
+                devices = [device for device in devices if device.channel_type in channel_types]
+            if not devices:
+                return 0
+
+            device_ids = [device.id for device in devices if device.id is not None]
+            identifiers = [device.identifier for device in devices]
+            scope = or_(
+                message_columns.device_id.in_(device_ids),
+                message_columns.sender.in_(identifiers),
+                message_columns.recipient.in_(identifiers),
+            )
+            return int(
+                session.exec(
+                    select(func.count())
+                    .select_from(MessageLog)
+                    .where(
+                        message_columns.direction.in_(
+                            [
+                                PennyConstants.MessageDirection.INCOMING,
+                                PennyConstants.MessageDirection.OUTGOING,
+                            ]
+                        ),
+                        message_columns.is_reaction.is_(False),
+                        scope,
+                    )
+                ).one()
+            )
 
     def get_unprocessed(self, sender: str, limit: int) -> list[MessageLog]:
         """Get recent unprocessed non-reaction messages from a specific user."""

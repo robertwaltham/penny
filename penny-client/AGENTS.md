@@ -1,5 +1,9 @@
 # PennyClient Instructions
 
+## Workflow And Review
+
+For task execution, use [`../docs/penny-client-agent-task-workflow.md`](../docs/penny-client-agent-task-workflow.md). For reviewing Swift/iOS pull requests, use [`../docs/penny-client-pr-review-guide.md`](../docs/penny-client-pr-review-guide.md) together with this file.
+
 ## Project Context
 PennyClient is a SwiftUI iOS chat client that connects to the Penny websocket service. The main app entry point and chat UI live in `PennyClient/PennyClient/Views/MessageView.swift`, with screen state and actions in `PennyClient/PennyClient/Views/MessageView+ViewModel.swift`.
 Use Xcode project-relative paths when working from Xcode tooling. Prefer Xcode tools for reading, editing, diagnostics, and builds.
@@ -9,6 +13,7 @@ Use Xcode project-relative paths when working from Xcode tooling. Prefer Xcode t
 - `PennyClient/PennyClient/Views/MessageView+ViewModel.swift`: Message screen view model.
 - `PennyClient/PennyClient/Views/SettingsView.swift`: Editable connection settings.
 - `PennyClient/PennyClient/Service/PennyWebSocketClient.swift`: Websocket connection, registration, message handling, badge clearing.
+- `PennyClient/PennyClient/Service/LogService.swift`: Central `Logger`/OSLog wrapper with log levels, privacy handling, and UTC timestamp prefixes.
 - `PennyClient/PennyClient/Service/DatabaseService.swift`: SQLite-backed message persistence.
 - `PennyClient/PennyClient/Service/Prefs.swift`: UserDefaults wrapper and optional `Secrets.plist` loading.
 - `PennyClient/PennyClient/AppDelegate.swift`: Push notification registration and foreground notification handling.
@@ -59,6 +64,14 @@ The chat UI uses:
 - split Markdown text blocks for incoming messages
 - attachment images inside incoming message bubbles
 Keep toolbar icons borderless/plain unless a visible Liquid Glass control is intentionally requested.
+
+## Logging
+Use `LogService`/`OSLogService` instead of `print`, `NSLog`, or direct `os_log` calls. Choose the level intentionally (`debug`, `info`, `notice`, `warning`, `error`, `fault`, `critical`) and keep dynamic values private by default unless the value is known non-sensitive operational metadata. `OSLogService` prefixes messages with a UTC ISO-8601 timestamp.
+
+Log concise, non-sensitive timing measurements for network and database work:
+- For websocket/network calls that expect a response, record elapsed time from send to matching receive and log it at debug level.
+- For local database reads and writes, measure elapsed time around the SQLite operation and log it at debug level.
+- Do not log message bodies, credentials, APNs tokens, device secrets, attachment contents, or raw SQL containing user content.
 
 ## Websocket Notes
 `PennyWebSocketClient` reads connection configuration from `Prefs.shared` at connect time. Saving Settings should reconnect the client so URL/auth changes take effect.

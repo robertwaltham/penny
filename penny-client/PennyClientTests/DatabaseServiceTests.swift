@@ -32,6 +32,68 @@ struct DatabaseServiceTests {
         #expect(loaded.first?.isOutgoing == false)
     }
 
+    @Test func persistsEmbeddingsAndPreservesExistingVectorWhenSyncPayloadOmitsIt() {
+        let database = DatabaseService()
+        database.setupForTesting()
+        let embedding = Data([0, 0, 128, 63])
+        database.save(message: MessageModel(
+            id: 42,
+            serverID: 42,
+            createdAt: Date(timeIntervalSince1970: 1),
+            content: "Original",
+            sourceHint: "Chat",
+            imageAttachmentDataURLs: [],
+            isOutgoing: false,
+            embedding: embedding
+        ))
+
+        database.save(message: MessageModel(
+            id: 42,
+            serverID: 42,
+            createdAt: Date(timeIntervalSince1970: 1),
+            content: "History refresh",
+            sourceHint: "Chat",
+            imageAttachmentDataURLs: [],
+            isOutgoing: false,
+            embedding: nil
+        ))
+
+        #expect(database.loadMessages().first?.content == "History refresh")
+        #expect(database.loadMessages().first?.embedding == embedding)
+    }
+
+    @Test func backgroundHistorySavePreservesAttachmentsWhenPageOmitsThem() async {
+        let database = DatabaseService()
+        database.setupForTesting()
+        let createdAt = Date(timeIntervalSince1970: 1)
+        database.save(message: MessageModel(
+            id: 7,
+            serverID: 7,
+            createdAt: createdAt,
+            content: "Original",
+            sourceHint: "Chat",
+            imageAttachmentDataURLs: ["data:image/png;base64,aGVsbG8="],
+            isOutgoing: false
+        ))
+
+        let saved = await database.saveMessagesInBackground(
+            [MessageModel(
+                id: 7,
+                serverID: 7,
+                createdAt: createdAt,
+                content: "Updated",
+                sourceHint: "Chat",
+                imageAttachmentDataURLs: [],
+                isOutgoing: false
+            )],
+            preserveAttachments: true
+        )
+
+        #expect(saved == 1)
+        #expect(database.loadMessages().first?.content == "Updated")
+        #expect(database.loadMessages().first?.imageAttachmentDataURLs == ["data:image/png;base64,aGVsbG8="])
+    }
+
     @Test func loadsMessagesInCreationOrder() {
         let database = DatabaseService()
         database.setupForTesting()
@@ -81,6 +143,17 @@ struct DatabaseServiceTests {
         #expect(olderPage.hasMore)
         #expect(oldestPage.messages.map(\.id) == [1])
         #expect(oldestPage.hasMore == false)
+    }
+
+    @Test func embeddedMessageLoadOnlyReturnsEmbeddedRowsAndAppliesFilters() {
+        let database = DatabaseService()
+        database.setupForTesting()
+        database.save(message: makeMessage(id: 1, content: "Penny", sourceHint: "Penny", embedding: floatData([1, 0])))
+        database.save(message: makeMessage(id: 2, content: "Schedule", sourceHint: "Schedule", embedding: floatData([0, 1])))
+        database.save(message: makeMessage(id: 3, content: "Unembedded", sourceHint: "Schedule"))
+
+        #expect(database.loadEmbeddedMessages(filter: .all).map(\.id) == [1, 2])
+        #expect(database.loadEmbeddedMessages(filter: .schedule).map(\.id) == [2])
     }
 
     @Test func messagePagesApplySourceFilters() {
@@ -135,6 +208,26 @@ struct DatabaseServiceTests {
         let loaded = database.loadMessages()
         #expect(loaded.map(\.content) == ["Canonical"])
     }
+
+    @Test func reconcilesLocalMessageWithoutScanningUnrelatedRows() {
+        let database = DatabaseService()
+        database.setupForTesting()
+        saveNumberedMessages(in: database, ids: 1...200)
+        database.save(message: makeMessage(id: -2, serverID: nil, content: "Different", isOutgoing: true))
+        database.save(message: makeMessage(id: -3, serverID: nil, content: "Echo", isOutgoing: true))
+        database.save(message: makeMessage(id: -4, serverID: nil, content: "Echo", isOutgoing: true))
+
+        let localID = database.reconcileLocalMessage(
+            content: "Echo",
+            createdAt: Date(timeIntervalSince1970: -4),
+            canonicalID: 400
+        )
+
+        #expect(localID == -4)
+        let loaded = database.loadMessages()
+        #expect(loaded.contains { $0.id == 400 && $0.serverID == 400 && $0.content == "Echo" })
+        #expect(loaded.contains { $0.id == -3 && $0.serverID == nil && $0.content == "Echo" })
+    }
 }
 
 private func saveNumberedMessages(in database: DatabaseService, ids: ClosedRange<Int>) {
@@ -148,7 +241,8 @@ private func makeMessage(
     serverID: Int? = nil,
     content: String,
     sourceHint: String? = nil,
-    isOutgoing: Bool = false
+    isOutgoing: Bool = false,
+    embedding: Data? = nil
 ) -> MessageModel {
     MessageModel(
         id: id,
@@ -157,6 +251,12 @@ private func makeMessage(
         content: content,
         sourceHint: sourceHint,
         imageAttachmentDataURLs: [],
-        isOutgoing: isOutgoing
+        isOutgoing: isOutgoing,
+        embedding: embedding
     )
+}
+
+private func floatData(_ values: [Float]) -> Data {
+    var values = values
+    return Data(bytes: &values, count: values.count * MemoryLayout<Float>.size)
 }

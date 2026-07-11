@@ -5,8 +5,35 @@ import SQLPropertyMacros
 final class DatabaseService {
     static let shared = DatabaseService()
 
+    private let logger: any LogService
     private var databaseConnection: Connection!
     private var isSetup = false
+    private let historySaveQueue = DispatchQueue(
+        label: "com.penny.history-save",
+        qos: .userInitiated
+    )
+
+    init(logger: any LogService = OSLogService(category: .database)) {
+        self.logger = logger
+    }
+
+    private func measureQuery<T>(_ name: String, _ query: () throws -> T) rethrows -> T {
+        let startDate = Date()
+        defer {
+            let elapsedMS = Int(Date().timeIntervalSince(startDate) * 1_000)
+            logger.debug("database query completed (name=\(name), elapsed_ms=\(elapsedMS))", privacy: .public)
+        }
+        return try query()
+    }
+
+    private func measureWrite<T>(_ name: String, _ write: () throws -> T) rethrows -> T {
+        let startDate = Date()
+        defer {
+            let elapsedMS = Int(Date().timeIntervalSince(startDate) * 1_000)
+            logger.debug("database write completed (name=\(name), elapsed_ms=\(elapsedMS))", privacy: .public)
+        }
+        return try write()
+    }
 
     func setupForTesting() {
         connectForTesting()
@@ -79,6 +106,23 @@ final class DatabaseService {
             }
             databaseConnection.userVersion = 3
         }
+
+        if currentVersion < 4 {
+            if try !MessageModel.columnExists(database: databaseConnection, name: "embedding") {
+                try databaseConnection.run(MessageModel.table().addColumn(MessageModel.embeddingExp))
+            }
+            databaseConnection.userVersion = 4
+        }
+
+        if currentVersion < 5 {
+            try MessageModel.createIndexes(database: databaseConnection)
+            databaseConnection.userVersion = 5
+        }
+
+        if currentVersion < 6 {
+            try MessageModel.createEmbeddedRowsIndex(database: databaseConnection)
+            databaseConnection.userVersion = 6
+        }
     }
 }
 
@@ -87,9 +131,40 @@ extension DatabaseService {
         setup()
 
         do {
-            return try MessageModel.load(database: databaseConnection)
+            return try measureQuery("load_messages") {
+                try MessageModel.load(database: databaseConnection)
+            }
         } catch {
-            print(error)
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
+            return []
+        }
+    }
+
+    func loadMessagesInBackground() async -> [MessageModel] {
+        await withCheckedContinuation { continuation in
+            historySaveQueue.async { [self] in
+                continuation.resume(returning: loadMessages())
+            }
+        }
+    }
+
+    func loadEmbeddedMessagesInBackground(filter: MessagePageFilter) async -> [MessageModel] {
+        await withCheckedContinuation { continuation in
+            historySaveQueue.async { [self] in
+                continuation.resume(returning: loadEmbeddedMessages(filter: filter))
+            }
+        }
+    }
+
+    func loadEmbeddedMessages(filter: MessagePageFilter) -> [MessageModel] {
+        setup()
+
+        do {
+            return try measureQuery("load_embedded_messages") {
+                try MessageModel.loadEmbedded(database: databaseConnection, filter: filter)
+            }
+        } catch {
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
             return []
         }
     }
@@ -99,14 +174,16 @@ extension DatabaseService {
         setup()
 
         do {
-            let page = try MessageModel.loadPage(database: databaseConnection, request: request)
+            let page = try measureQuery("load_message_page") {
+                try MessageModel.loadPage(database: databaseConnection, request: request)
+            }
             return MessagePage(
                 messages: page.models.map(ChatMessage.init(model:)),
                 nextCursor: page.nextCursor,
                 hasMore: page.hasMore
             )
         } catch {
-            print(error)
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
             return MessagePage(messages: [], nextCursor: nil, hasMore: false)
         }
     }
@@ -115,9 +192,11 @@ extension DatabaseService {
         setup()
 
         do {
-            return try MessageModel.minimumID(database: databaseConnection)
+            return try measureQuery("minimum_message_id") {
+                try MessageModel.minimumID(database: databaseConnection)
+            }
         } catch {
-            print(error)
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
             return nil
         }
     }
@@ -126,9 +205,11 @@ extension DatabaseService {
         setup()
 
         do {
-            return try MessageModel.contains(database: databaseConnection, serverID: serverID)
+            return try measureQuery("contains_message") {
+                try MessageModel.contains(database: databaseConnection, serverID: serverID)
+            }
         } catch {
-            print(error)
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
             return false
         }
     }
@@ -138,30 +219,35 @@ extension DatabaseService {
         setup()
 
         do {
-            return try MessageModel.reconcileLegacyMessage(
-                database: databaseConnection,
-                outboxID: outboxID,
-                canonicalID: canonicalID
-            )
+            return try measureWrite("reconcile_legacy_message") {
+                try MessageModel.reconcileLegacyMessage(
+                    database: databaseConnection,
+                    outboxID: outboxID,
+                    canonicalID: canonicalID
+                )
+            }
         } catch {
-            print(error)
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
             return false
         }
     }
 
+    @MainActor
     @discardableResult
     func reconcileLocalMessage(content: String, createdAt: Date, canonicalID: Int) -> Int? {
         setup()
 
         do {
-            return try MessageModel.reconcileLocalMessage(
-                database: databaseConnection,
-                content: content,
-                createdAt: createdAt,
-                canonicalID: canonicalID
-            )
+            return try measureWrite("reconcile_local_message") {
+                try MessageModel.reconcileLocalMessage(
+                    database: databaseConnection,
+                    content: content,
+                    createdAt: createdAt,
+                    canonicalID: canonicalID
+                )
+            }
         } catch {
-            print(error)
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
             return nil
         }
     }
@@ -170,9 +256,76 @@ extension DatabaseService {
         setup()
 
         do {
-            try message.save(database: databaseConnection)
+            var message = message
+            if message.embedding == nil, let serverID = message.serverID {
+                message.embedding = try measureQuery("message_embedding") {
+                    try MessageModel.embedding(
+                        database: databaseConnection,
+                        serverID: serverID
+                    )
+                }
+            }
+            try measureWrite("save_message") {
+                try message.save(database: databaseConnection)
+            }
         } catch {
-            print(error)
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
+        }
+    }
+
+    /// Persist a history page in one transaction away from the main actor.
+    /// Keeping the whole page in one transaction avoids a UI stall caused by
+    /// opening and committing SQLite work once per message.
+    func saveMessagesInBackground(
+        _ messages: [MessageModel],
+        preserveAttachments: Bool
+    ) async -> Int {
+        await withCheckedContinuation { continuation in
+            historySaveQueue.async { [self] in
+                continuation.resume(
+                    returning: saveMessages(messages, preserveAttachments: preserveAttachments)
+                )
+            }
+        }
+    }
+
+    @discardableResult
+    func saveMessages(_ messages: [MessageModel], preserveAttachments: Bool) -> Int {
+        guard !messages.isEmpty else { return 0 }
+        setup()
+
+        do {
+            var messages = messages
+            try measureWrite("save_messages") {
+                try databaseConnection.transaction {
+                    for index in messages.indices {
+                        if messages[index].embedding == nil, let serverID = messages[index].serverID {
+                            messages[index].embedding = try measureQuery("message_embedding") {
+                                try MessageModel.embedding(
+                                    database: databaseConnection,
+                                    serverID: serverID
+                                )
+                            }
+                        }
+                        if preserveAttachments, let serverID = messages[index].serverID {
+                            let existing = try measureQuery("message_attachments") {
+                                try MessageModel.attachments(
+                                    database: databaseConnection,
+                                    serverID: serverID
+                                )
+                            }
+                            if let existing {
+                                messages[index].imageAttachmentDataURLs = existing
+                            }
+                        }
+                        try messages[index].save(database: databaseConnection)
+                    }
+                }
+            }
+            return messages.count
+        } catch {
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
+            return 0
         }
     }
 
@@ -180,9 +333,11 @@ extension DatabaseService {
         setup()
 
         do {
-            try databaseConnection.run(MessageModel.table().delete())
+            _ = try measureWrite("delete_all_messages") {
+                try databaseConnection.run(MessageModel.table().delete())
+            }
         } catch {
-            print(error)
+            logger.error("Database operation failed: \(error.localizedDescription)", privacy: .public)
         }
     }
 }
@@ -199,6 +354,7 @@ struct MessageModel: Codable, Identifiable, Hashable {
         deviceIdentifier = message.deviceIdentifier
         parentID = message.parentID
         imageAttachmentDataURLs = message.imageAttachmentDataURLs
+        embedding = message.embedding
         isOutgoing = message.isOutgoing
     }
 
@@ -213,7 +369,8 @@ struct MessageModel: Codable, Identifiable, Hashable {
         deviceIdentifier: String? = nil,
         parentID: Int? = nil,
         imageAttachmentDataURLs: [String],
-        isOutgoing: Bool
+        isOutgoing: Bool,
+        embedding: Data? = nil
     ) {
         self.id = id
         self.serverID = serverID
@@ -225,6 +382,7 @@ struct MessageModel: Codable, Identifiable, Hashable {
         self.deviceIdentifier = deviceIdentifier
         self.parentID = parentID
         self.imageAttachmentDataURLs = imageAttachmentDataURLs
+        self.embedding = embedding
         self.isOutgoing = isOutgoing
     }
 
@@ -250,6 +408,10 @@ struct MessageModel: Codable, Identifiable, Hashable {
     fileprivate static var imageAttachmentDataURLsExp: SQLite.Expression<String> {
         Expression<String>("image_attachment_data_urls")
     }
+    var embedding: Data?
+    fileprivate static var embeddingExp: SQLite.Expression<Data?> {
+        Expression<Data?>("embedding")
+    }
     @SqlProperty
     var isOutgoing: Bool
 
@@ -266,9 +428,24 @@ struct MessageModel: Codable, Identifiable, Hashable {
                 tableBuilder.column(contentExp)
                 tableBuilder.column(sourceHintExp)
                 tableBuilder.column(imageAttachmentDataURLsExp, defaultValue: "[]")
+                tableBuilder.column(embeddingExp)
                 tableBuilder.column(isOutgoingExp)
             }
         )
+    }
+
+    fileprivate static func createIndexes(database: Connection) throws {
+        try database.run(table().createIndex(createdAtExp, idExp, ifNotExists: true))
+        try database.run(table().createIndex(sourceHintExp, createdAtExp, idExp, ifNotExists: true))
+        try database.run(table().createIndex(serverIDExp, isOutgoingExp, contentExp, createdAtExp, idExp, ifNotExists: true))
+    }
+
+    fileprivate static func createEmbeddedRowsIndex(database: Connection) throws {
+        try database.run("""
+            CREATE INDEX IF NOT EXISTS index_messages_embedded_created_at_id
+            ON messages(created_at, id)
+            WHERE embedding IS NOT NULL
+            """)
     }
 
     fileprivate func save(database: Connection) throws {
@@ -284,6 +461,7 @@ struct MessageModel: Codable, Identifiable, Hashable {
                 MessageModel.deviceIdentifierExp <- deviceIdentifier,
                 MessageModel.parentIDExp <- parentID,
                 MessageModel.imageAttachmentDataURLsExp <- MessageModel.encodedImageAttachmentDataURLs(imageAttachmentDataURLs),
+                MessageModel.embeddingExp <- embedding,
                 MessageModel.isOutgoingExp <- isOutgoing
             )
         )
@@ -295,6 +473,15 @@ struct MessageModel: Codable, Identifiable, Hashable {
             result.append(message(from: entry))
         }
         return result
+    }
+
+    fileprivate static func loadEmbedded(database: Connection, filter: MessagePageFilter) throws -> [MessageModel] {
+        let query = filteredTable(for: filter)
+            .filter(embeddingExp != nil)
+            .order(createdAtExp.asc)
+        return try database.prepare(query).map { row in
+            message(from: row)
+        }
     }
 
     @MainActor
@@ -353,15 +540,17 @@ struct MessageModel: Codable, Identifiable, Hashable {
         return true
     }
 
+    @MainActor
     fileprivate static func reconcileLocalMessage(
         database: Connection,
         content: String,
         createdAt: Date,
         canonicalID: Int
     ) throws -> Int? {
-        let candidates = try load(database: database).filter {
-            $0.serverID == nil && $0.id < 0 && $0.isOutgoing && $0.content == content
-        }
+        let candidates = try database.prepare(
+            table()
+                .filter(serverIDExp == nil && idExp < 0 && isOutgoingExp && contentExp == content)
+        ).map(message(from:))
         guard let local = candidates.min(by: {
             abs($0.createdAt.timeIntervalSince(createdAt)) < abs($1.createdAt.timeIntervalSince(createdAt))
         }) else {
@@ -410,8 +599,20 @@ struct MessageModel: Codable, Identifiable, Hashable {
             deviceIdentifier: entry[deviceIdentifierExp],
             parentID: entry[parentIDExp],
             imageAttachmentDataURLs: decodedImageAttachmentDataURLs(entry[imageAttachmentDataURLsExp]),
-            isOutgoing: entry[isOutgoingExp]
+            isOutgoing: entry[isOutgoingExp],
+            embedding: entry[embeddingExp]
         )
+    }
+
+    fileprivate static func embedding(database: Connection, serverID: Int) throws -> Data? {
+        try database.pluck(table().filter(serverIDExp == serverID))?[embeddingExp]
+    }
+
+    fileprivate static func attachments(database: Connection, serverID: Int) throws -> [String]? {
+        guard let row = try database.pluck(table().filter(serverIDExp == serverID)) else {
+            return nil
+        }
+        return decodedImageAttachmentDataURLs(row[imageAttachmentDataURLsExp])
     }
 
     fileprivate static func encodedImageAttachmentDataURLs(_ dataURLs: [String]) -> String {
