@@ -167,3 +167,36 @@ class TestIosApnsProductionConfig:
 
         with pytest.raises(ValueError, match="IOS_APNS_PRODUCTION_TEAM_ID"):
             Config.load()
+
+
+class TestMaxStepsEnvWiring:
+    """The ``MAX_STEPS`` runtime param threads from the env-override tier (#1601).
+
+    The env tier reads ``os.getenv(param.key)`` — the key is ``MAX_STEPS``. Docs once
+    named this env var ``MESSAGE_MAX_STEPS``, which the tier never reads, so a value set
+    under that name was silently ignored. ``MAX_STEPS`` is the canonical name.
+    """
+
+    def _base_env(self, monkeypatch):
+        """Neutralize the on-disk .env read and satisfy channel + embedding validation."""
+        monkeypatch.setattr("penny.config._load_dotenv", lambda: None)
+        monkeypatch.setenv("SIGNAL_NUMBER", "+15551234567")
+        monkeypatch.setenv("LLM_EMBEDDING_MODEL", "embeddinggemma")
+
+    def test_max_steps_env_var_lands_on_runtime(self, monkeypatch):
+        """``MAX_STEPS=15`` (the canonical key) flows into ``config.runtime.MAX_STEPS``."""
+        self._base_env(monkeypatch)
+        monkeypatch.setenv("MAX_STEPS", "15")
+
+        config = Config.load()
+
+        assert config.runtime.MAX_STEPS == 15
+
+    def test_default_holds_when_nothing_overrides(self, monkeypatch):
+        """Unset → the ConfigParam default (20, equal to BACKGROUND_MAX_STEPS) applies."""
+        self._base_env(monkeypatch)
+        monkeypatch.delenv("MAX_STEPS", raising=False)
+
+        config = Config.load()
+
+        assert config.runtime.MAX_STEPS == 20
