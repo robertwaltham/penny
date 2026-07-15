@@ -81,7 +81,7 @@ class TestMigrate:
         conn.close()
 
         count = migrate(db_path)
-        assert count == 92
+        assert count == 93
 
         conn = sqlite3.connect(db_path)
         tables = {
@@ -122,7 +122,7 @@ class TestMigrate:
 
         count1 = migrate(db_path)
         count2 = migrate(db_path)
-        assert count1 == 92
+        assert count1 == 93
         assert count2 == 0
 
     def test_tracks_in_migrations_table(self, tmp_path):
@@ -160,8 +160,8 @@ class TestMigrate:
         conn.close()
 
         count = migrate(db_path)
-        # 0001 is skipped; the rest run = 91 migrations
-        assert count == 91
+        # 0001 is skipped; the rest run = 92 migrations
+        assert count == 92
 
     def test_bootstrap_with_tables_already_present(self, tmp_path):
         """If tables already exist (from SQLModel.create_tables), migration should succeed."""
@@ -187,7 +187,7 @@ class TestMigrate:
         conn.close()
 
         count = migrate(db_path)
-        assert count == 92  # all migrations applied
+        assert count == 93  # all migrations applied
 
         conn = sqlite3.connect(db_path)
         cursor = conn.execute("SELECT name FROM _migrations")
@@ -730,7 +730,13 @@ class TestMigrate:
         """Migration 0086 retires the pub/sub layer over the full chain: archives the
         notifier consumer, drops the ``published`` column, and rewrites the seeded
         skills that taught ``published`` to teach ``notify`` — the sole emission
-        flag now (emission is a collection property + the run-time notify suffix)."""
+        flag now (emission is a collection property + the run-time notify suffix).
+
+        0086's ``published`` → ``notify`` entry rewrites can't be asserted at
+        end-of-chain — 0092 (the skills-collection retirement, #1624) deletes every
+        seeded ``skills`` entry downstream.  The rewrite of the ``skills``
+        collector's own prompt is still witnessed: the archived tombstone keeps its
+        ``extraction_prompt`` intact."""
         db_path = str(tmp_path / "test.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE _bootstrap (id INTEGER PRIMARY KEY)")
@@ -745,17 +751,6 @@ class TestMigrate:
         skills_prompt = conn.execute(
             "SELECT extraction_prompt FROM memory WHERE name = 'skills'"
         ).fetchone()[0]
-        skill_bodies = dict(
-            conn.execute(
-                "SELECT key, content FROM memory_entry WHERE memory_name = 'skills' "
-                "AND key IN (?, ?, ?)",
-                (
-                    "Research collection — notify on new finds",
-                    "Research collection — silent",
-                    "Flip silent ↔ notify",
-                ),
-            ).fetchall()
-        )
         conn.close()
 
         # The retired pub/sub column is gone; ``notify`` is the sole emission flag.
@@ -763,12 +758,7 @@ class TestMigrate:
         assert "notify" in columns
         # The notifier consumer is archived (a visible tombstone), not deleted.
         assert notifier is not None and notifier[0] == 1
-        # The seeded skills teach ``notify`` now — no dropped flag in a re-homable recipe.
-        assert "notify: true" in skill_bodies["Research collection — notify on new finds"]
-        assert "notify: false" in skill_bodies["Research collection — silent"]
-        assert "notify=true" in skill_bodies["Flip silent ↔ notify"]
-        for body in skill_bodies.values():
-            assert "published" not in body
+        # The skills tombstone's prompt teaches ``notify`` — 0086's rewrite held.
         assert "notify: true" in skills_prompt
         assert "published" not in skills_prompt
 
@@ -779,7 +769,9 @@ class TestMigrate:
         done().``), ``quality`` (``5. done().``), ``thoughts`` (``8. done().``), and
         the archived ``notifier``/``unnotified-thoughts`` shells — while compound
         terminal steps (``skills`` step 8, ``notified-thoughts`` step 4) and prose
-        *descriptions* of done behaviour survive verbatim (zero-false-positive)."""
+        *descriptions* of done behaviour survive verbatim (zero-false-positive).
+        The ``skills`` prompt survives at end-of-chain on its archived tombstone
+        (0092 archives the collection but leaves the prompt intact)."""
         db_path = str(tmp_path / "test.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE _bootstrap (id INTEGER PRIMARY KEY)")
@@ -867,7 +859,9 @@ class TestMigrate:
         """Migration 0089 (over the full chain, #1569): the ``skills`` collector
         prompt's two ``done(success=…, summary=…)`` conditionals are rewritten to
         the argless ``done()``, and the ``quality`` collection is archived (a
-        visible tombstone) with its extraction_prompt left intact."""
+        visible tombstone) with its extraction_prompt left intact.  (The ``skills``
+        prompt survives at end-of-chain on its own archived tombstone — 0092
+        archives the collection but leaves the prompt intact.)"""
         db_path = str(tmp_path / "test.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE _bootstrap (id INTEGER PRIMARY KEY)")
@@ -891,6 +885,41 @@ class TestMigrate:
         # Quality is archived (tombstone); its prompt is untouched (never dispatched).
         assert archived == 1
         assert quality_prompt is not None
+
+    def test_0092_retires_skills_collection_entirely(self, tmp_path):
+        """Migration 0092 (over the full chain, #1624 as amended): the ``skills``
+        collection retires ENTIRELY — there is exactly one skills store, the
+        ``skill`` table.  The collection is archived (visible tombstone, the
+        0086/0089 pattern; its prompt left intact) and every migration-seeded rule
+        entry is deleted — on a fresh install the collection is empty."""
+        db_path = str(tmp_path / "test.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE _bootstrap (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+
+        migrate(db_path)
+
+        conn = sqlite3.connect(db_path)
+        prompt, archived = conn.execute(
+            "SELECT extraction_prompt, archived FROM memory WHERE name = 'skills'"
+        ).fetchone()
+        keys = [
+            row[0]
+            for row in conn.execute(
+                "SELECT key FROM memory_entry WHERE memory_name = 'skills'"
+            ).fetchall()
+        ]
+        conn.close()
+
+        # The collection is an archived tombstone: never dispatched (``_is_ready``
+        # skips archived rows), hidden from the catalog, out of the store map.
+        assert archived == 1
+        # Its prompt survives as the tombstone's historical record (0089 pattern).
+        assert prompt is not None
+        # Every seeded rule entry is gone — a fresh install ships the collection
+        # empty; the taught-skill table is the sole skills store.
+        assert keys == []
 
     def test_0074_deletes_degenerate_memory_entries(self, tmp_path):
         """Migration 0074 deletes entries whose key or content carries a

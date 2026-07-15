@@ -430,8 +430,16 @@ class PennyConstants:
     # hidden from the catalog (via ``SYSTEM_COLLECTIONS``).
     MEMORY_QUALITY_COLLECTION = "quality"
 
-    # The skills collector (seeded by migration 0043): distils reusable workflow
-    # patterns from the real collections that exist, surfaced to chat via recall.
+    # The retired skills collection (seeded by migration 0043, ARCHIVED by 0092,
+    # #1624).  It carried prose skill recipes — a reconcile collector maintained
+    # them by model judgment, and the self-state section rendered them as standing
+    # rules.  Both duties are superseded by the structural path: there is exactly
+    # ONE skills store now, the ``skill`` TABLE (taught #1590, instantiated #1591,
+    # fired ambiently #1621, re-rendered #1620).  0092 archived the collection
+    # (visible tombstone) and deleted its seeded rule entries (never demonstrated,
+    # so they cannot enter the certified-by-execution table; needed behaviors get
+    # re-taught live).  Retained here to keep the archived shell hidden from the
+    # catalog (via ``SYSTEM_COLLECTIONS``), same as quality/notifier.
     MEMORY_SKILLS_COLLECTION = "skills"
     # The retired pub/sub notifier consumer (seeded by migration 0067, archived by
     # #1557): it drained every ``published`` collection's new entries and delivered
@@ -449,11 +457,11 @@ class PennyConstants:
     MEMORY_THOUGHTS_COLLECTION = "thoughts"
 
     # Built-in framework collections, seeded by migration rather than created by
-    # the user.  ``collection_catalog`` hides them: the skills collector distils
-    # reusable patterns from the collections the *user* builds, and these are
-    # Penny's own machinery (the skills/self-correction/notification loops and
-    # the preference/knowledge/thought extractors) — distilling skills from them
-    # would only mint meta-noise.  Parallels ``SYSTEM_LOGS``.
+    # the user.  ``collection_catalog`` hides them: these are Penny's own machinery
+    # (the preference/knowledge/thought extractors and the retired
+    # skills/notification/self-correction shells), not collections the *user*
+    # built, so the catalog — which surfaces user-built collections — leaves them
+    # out.  Parallels ``SYSTEM_LOGS``.
     SYSTEM_COLLECTIONS = frozenset(
         {
             MEMORY_SKILLS_COLLECTION,
