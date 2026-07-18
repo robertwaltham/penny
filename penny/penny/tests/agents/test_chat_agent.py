@@ -64,19 +64,11 @@ async def test_basic_message_flow(
         # Verify we have a WebSocket connection
         assert len(signal_server._websockets) == 1, "Penny should have connected to WebSocket"
 
-        # Seed full context: notified thought, dislike, active memory
-        thought = penny.db.thoughts.add(TEST_SENDER, "Recent thought about amps")
-        if thought:
-            penny.db.thoughts.mark_notified(thought.id)
-        penny.db.preferences.add(
-            user=TEST_SENDER,
-            content="Country music",
-            valence="negative",
-        )
         # Memory seed: exercise every rendering path in one verbatim assertion.
         # Test-only names avoid colliding with system memories created by
-        # migrations 0026/0027/0068 (user-messages, penny-messages,
-        # browse-results, likes, dislikes, knowledge, thoughts).
+        # migrations 0026/0027 (user-messages, penny-messages, browse-results,
+        # dislikes) — the generic catch-alls (likes/knowledge/thoughts + the
+        # retired shells) were nuked by migration 0097 (#1676).
         # Active memories rendered in alphabetical order: "playlists" < "tips".
         penny.db.memories.create_collection("playlists", "favorite playlists")
         penny.db.memory("playlists").write(
@@ -176,14 +168,6 @@ async def test_basic_message_flow(
         # Mock browse provider is wired in conftest; the tool was invoked once.
         assert len(browse_entries) >= 1
         assert all(e.author == "chat" for e in browse_entries)
-
-        # No conversation echo thoughts should be logged
-        # (old _log_conversation_thought is removed; thoughts come from tool reasoning only)
-        thoughts = penny.db.thoughts.get_recent(TEST_SENDER, limit=10)
-        conversation_echoes = [
-            t for t in thoughts if t.content.startswith("Conversation: user said")
-        ]
-        assert len(conversation_echoes) == 0, "Conversation echo thoughts should not be logged"
 
 
 # ── 1b. Provenance stamping ─────────────────────────────────
@@ -1096,14 +1080,6 @@ _BASIC_FLOW_EXPECTED = (
     "\n"
     "### Active mechanisms\n"
     "- dislikes — active · every 300 · no runs yet\n"
-    "- knowledge — active · every 300 · no runs yet\n"
-    "- likes — active · every 300 · no runs yet\n"
-    "- notified-thoughts — archived YYYY-MM-DD HH:MM UTC · no runs yet\n"
-    "- notifier — archived YYYY-MM-DD HH:MM UTC · no runs yet\n"
-    "- quality — archived YYYY-MM-DD HH:MM UTC · no runs yet\n"
-    "- skills — archived YYYY-MM-DD HH:MM UTC · no runs yet\n"
-    "- thoughts — active · every 5400 · no runs yet\n"
-    "- unnotified-thoughts — archived YYYY-MM-DD HH:MM UTC · no runs yet\n"
     "\n"
     "### Recent activity\n"
     "change · YYYY-MM-DD HH:MM UTC · old-facts archived by user-run\n"
@@ -1117,14 +1093,9 @@ _BASIC_FLOW_EXPECTED = (
     "generated structural record (outcome, counts, tool trace)\n"
     "- dislikes (collection, 0 entries) — Topics the user has expressed negative "
     "sentiment about\n"
-    "- knowledge (collection, 0 entries) — Summarized facts from web pages Penny has read\n"
-    "- likes (collection, 0 entries) — Topics the user has expressed positive sentiment "
-    "about\n"
     "- penny-messages (log, 0 entries) — Every outgoing Penny reply\n"
     "- playlists (collection, 1 entries) — favorite playlists\n"
     "- secrets (collection, 1 entries) — hidden\n"
-    "- thoughts (collection, 0 entries) — Penny's inner-monologue thoughts about the "
-    "user's interests.\n"
     "- tips (log, 1 entries) — useful tips\n"
     "- user-messages (log, 0 entries) — Every incoming user message\n"
     "\n"
