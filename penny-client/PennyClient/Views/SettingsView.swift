@@ -25,6 +25,37 @@ struct SettingsView: View {
                     LabeledContent("Pending", value: "\(viewModel.client.pendingCount)")
                 }
 
+                if let settings = viewModel.notificationSettings {
+                    Section("Notifications") {
+                        Picker("Group non-chat notifications", selection: notificationIntervalBinding(settings: settings)) {
+                            Text("Immediately").tag(0)
+                            Text("5 minutes").tag(300)
+                            Text("15 minutes").tag(900)
+                            Text("30 minutes").tag(1800)
+                            Text("1 hour").tag(3600)
+                        }
+                        ForEach(settings.categories) { category in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Toggle(category.displayName, isOn: categoryBinding(id: category.id, settings: settings))
+                                if category.id != "chat" && category.enabled {
+                                    Picker("Grouping interval", selection: categoryIntervalBinding(id: category.id, settings: settings)) {
+                                        Text("Use Global").tag(0)
+                                        Text("Immediately").tag(1)
+                                        Text("5 minutes").tag(300)
+                                        Text("15 minutes").tag(900)
+                                        Text("30 minutes").tag(1800)
+                                        Text("1 hour").tag(3600)
+                                    }
+                                    .font(.caption)
+                                }
+                            }
+                        }
+                        Text("Disabled categories remain available as unread messages; they do not show a banner or sound.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Connection") {
                     TextField("WebSocket URL", text: $viewModel.webSocketURL)
                         .textInputAutocapitalization(.never)
@@ -186,6 +217,7 @@ struct SettingsView: View {
             }
             .task {
                 viewModel.refresh()
+                viewModel.requestNotificationSettings()
             }
             #if DEBUG
             .confirmationDialog(
@@ -206,6 +238,57 @@ struct SettingsView: View {
     private func save() {
         viewModel.saveConnection()
         dismiss()
+    }
+
+    private func notificationIntervalBinding(settings: NotificationSettingsPayload) -> Binding<Int> {
+        Binding(
+            get: { settings.globalIntervalSeconds },
+            set: { value in
+                var updated = settings
+                updated.globalIntervalSeconds = value
+                viewModel.updateNotificationSettings(updated)
+            }
+        )
+    }
+
+    private func categoryBinding(id: String, settings: NotificationSettingsPayload) -> Binding<Bool> {
+        Binding(
+            get: { settings.categories.first(where: { $0.id == id })?.enabled ?? true },
+            set: { enabled in
+                var updated = settings
+                guard let index = updated.categories.firstIndex(where: { $0.id == id }) else { return }
+                updated.categories[index].enabled = enabled
+                viewModel.updateNotificationSettings(updated)
+            }
+        )
+    }
+
+    private func categoryIntervalBinding(id: String, settings: NotificationSettingsPayload) -> Binding<Int> {
+        Binding(
+            get: {
+                guard let value = settings.categories.first(where: { $0.id == id })?.overrideSeconds else { return 0 }
+                return value == 0 ? 1 : value
+            },
+            set: { value in
+                var updated = settings
+                guard let index = updated.categories.firstIndex(where: { $0.id == id }) else { return }
+                updated.categories[index].overrideSeconds = value == 0 ? nil : value == 1 ? 0 : value
+                viewModel.updateNotificationSettings(updated)
+            }
+        )
+    }
+}
+
+private extension NotificationCategorySetting {
+    var displayName: String {
+        switch id {
+        case "chat": return "Chat replies"
+        case "collector": return "Collector updates"
+        case "thoughts": return "Thoughts"
+        case "startup": return "Startup messages"
+        case "test_push": return "Test pushes"
+        default: return id.capitalized
+        }
     }
 }
 

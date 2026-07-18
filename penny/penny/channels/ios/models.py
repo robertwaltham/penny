@@ -11,6 +11,8 @@ IOS_MSG_TYPE_HISTORY = "history_request"
 IOS_MSG_TYPE_MESSAGE = "message"
 IOS_MSG_TYPE_PULL = "pull_messages"
 IOS_MSG_TYPE_REGISTER = "register"
+IOS_MSG_TYPE_NOTIFICATION_SETTINGS = "notification_settings_request"
+IOS_MSG_TYPE_NOTIFICATION_SETTINGS_UPDATE = "notification_settings_update"
 
 IOS_RESP_TYPE_ACKED = "messages_acked"
 IOS_RESP_TYPE_EMBEDDING = "embedding_response"
@@ -19,6 +21,7 @@ IOS_RESP_TYPE_OUTBOX_CHANGED = "outbox_changed"
 IOS_RESP_TYPE_REGISTERED = "registered"
 IOS_RESP_TYPE_STATUS = "status"
 IOS_RESP_TYPE_TYPING = "typing"
+IOS_RESP_TYPE_NOTIFICATION_SETTINGS = "notification_settings_response"
 IOS_RESP_TYPE_AGENT_PROGRESS = "agent_progress"
 
 
@@ -65,6 +68,16 @@ class IosAckMessages(BaseModel):
 
     type: str = IOS_MSG_TYPE_ACK
     ids: list[int]
+
+
+class IosNotificationSettingsRequest(BaseModel):
+    type: str = IOS_MSG_TYPE_NOTIFICATION_SETTINGS
+
+
+class IosNotificationSettingsUpdate(BaseModel):
+    type: str = IOS_MSG_TYPE_NOTIFICATION_SETTINGS_UPDATE
+    global_interval_seconds: int
+    categories: list[dict]
 
 
 class IosEmbeddingRequest(BaseModel):

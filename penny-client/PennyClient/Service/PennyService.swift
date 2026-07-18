@@ -63,6 +63,7 @@ final class PennyService {
     }
     var lastError: String?
     var runtimeConfigParams: [RuntimeConfigParam] = []
+    var notificationSettings: NotificationSettingsPayload?
     var promptLogRuns: [PromptLogRun] = []
     var promptLogsHasMore = false
     var memories: [MemoryRecord] = []
@@ -335,6 +336,14 @@ extension PennyService {
         send(.configUpdate(key: key, value: value))
     }
 
+    func requestNotificationSettings() {
+        send(.notificationSettingsRequest)
+    }
+
+    func updateNotificationSettings(_ settings: NotificationSettingsPayload) {
+        send(.notificationSettingsUpdate(settings))
+    }
+
     func requestPromptLogs(
         agentName: String? = nil,
         offset: Int? = nil,
@@ -594,6 +603,8 @@ extension PennyService {
             applyAgentProgress(payload)
         case .configResponse(let payload):
             runtimeConfigParams = payload.params
+        case .notificationSettingsResponse(let payload):
+            notificationSettings = payload
         case .promptLogsResponse(let payload):
             if payload.runs.isEmpty || promptLogRuns.isEmpty {
                 promptLogRuns = payload.runs

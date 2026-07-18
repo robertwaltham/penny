@@ -230,6 +230,10 @@ final class SettingsViewModel {
         client.runtimeConfigParams
     }
 
+    var notificationSettings: NotificationSettingsPayload? {
+        client.notificationSettings
+    }
+
     var domainPermissions: [DomainPermissionEntry] {
         client.domainPermissions
     }
@@ -259,6 +263,14 @@ final class SettingsViewModel {
         guard !value.isEmpty else { return }
         editedConfigValues[param.key] = value
         client.updateConfig(key: param.key, value: value)
+    }
+
+    func requestNotificationSettings() {
+        client.requestNotificationSettings()
+    }
+
+    func updateNotificationSettings(_ settings: NotificationSettingsPayload) {
+        client.updateNotificationSettings(settings)
     }
 
     func saveConnection() {

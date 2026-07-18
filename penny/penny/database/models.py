@@ -468,9 +468,49 @@ class IosOutboxItem(SQLModel, table=True):
     source_hint: str | None = None
     push_title: str
     push_summary: str
+    notification_category: str = Field(default="collector", index=True)
+    notification_batch_id: int | None = Field(default=None, index=True)
     push_sent_at: datetime | None = None
     push_error: str | None = None
     acked_at: datetime | None = Field(default=None, index=True)
+
+
+class IosNotificationPreference(SQLModel, table=True):
+    """Account-wide iOS notification preference for one stable category."""
+
+    __tablename__ = "ios_notification_preference"
+
+    category: str = Field(primary_key=True)
+    enabled: bool = Field(default=True)
+    interval_seconds: int | None = None  # NULL means inherit the global interval
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class IosNotificationPolicy(SQLModel, table=True):
+    """Singleton account-wide iOS notification policy."""
+
+    __tablename__ = "ios_notification_policy"
+
+    id: int = Field(default=1, primary_key=True)
+    global_interval_seconds: int = Field(default=900)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class IosNotificationBatch(SQLModel, table=True):
+    """Durable per-device/category APNs batching window."""
+
+    __tablename__ = "ios_notification_batch"
+
+    id: int | None = Field(default=None, primary_key=True)
+    device_id: int = Field(foreign_key="device.id", index=True)
+    category: str = Field(index=True)
+    started_at: datetime = Field(index=True)
+    due_at: datetime = Field(index=True)
+    state: str = Field(default="open", index=True)  # open/sending/sent/cancelled
+    lease_until: datetime | None = Field(default=None, index=True)
+    summary_sent_at: datetime | None = None
+    summary_count: int = 0
+    last_error: str | None = None
 
 
 class Media(SQLModel, table=True):

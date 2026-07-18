@@ -13,6 +13,8 @@ enum ClientMessage: Encodable {
     case heartbeat
     case configRequest
     case configUpdate(key: String, value: String)
+    case notificationSettingsRequest
+    case notificationSettingsUpdate(NotificationSettingsPayload)
     case promptLogsRequest(agentName: String?, offset: Int?, query: String?, flaggedOnly: Bool?)
     case memoriesRequest(query: String?)
     case memoryDetailRequest(name: String, query: String?)
@@ -90,6 +92,12 @@ enum ClientMessage: Encodable {
             try container.encode("config_update", forKey: .type)
             try container.encode(key, forKey: .key)
             try container.encode(value, forKey: .value)
+        case .notificationSettingsRequest:
+            try container.encode("notification_settings_request", forKey: .type)
+        case .notificationSettingsUpdate(let payload):
+            try container.encode("notification_settings_update", forKey: .type)
+            try container.encode(payload.globalIntervalSeconds, forKey: .globalIntervalSeconds)
+            try container.encode(payload.categories, forKey: .categories)
         case .promptLogsRequest(let agentName, let offset, let query, let flaggedOnly):
             try container.encode("prompt_logs_request", forKey: .type)
             try container.encodeIfPresent(agentName, forKey: .agentName)
@@ -208,6 +216,8 @@ enum ClientMessage: Encodable {
             return nil
         case .configRequest, .configUpdate:
             return "config_response"
+        case .notificationSettingsRequest, .notificationSettingsUpdate:
+            return "notification_settings_response"
         case .promptLogsRequest:
             return "prompt_logs_response"
         case .memoriesRequest:
@@ -247,6 +257,10 @@ enum ClientMessage: Encodable {
             return "config_request"
         case .configUpdate:
             return "config_update"
+        case .notificationSettingsRequest:
+            return "notification_settings_request"
+        case .notificationSettingsUpdate:
+            return "notification_settings_update"
         case .promptLogsRequest:
             return "prompt_logs_request"
         case .memoriesRequest:
@@ -300,6 +314,8 @@ enum ClientMessage: Encodable {
         case ids
         case key
         case value
+        case globalIntervalSeconds = "global_interval_seconds"
+        case categories
         case agentName = "agent_name"
         case offset
         case query
@@ -420,6 +436,7 @@ enum ServerEnvelope: Decodable {
     case typing(TypingPayload)
     case agentProgress(AgentProgressPayload)
     case configResponse(ConfigResponsePayload)
+    case notificationSettingsResponse(NotificationSettingsPayload)
     case promptLogsResponse(PromptLogsResponsePayload)
     case promptLogUpdate(PromptLogUpdatePayload)
     case runOutcomeUpdate(RunOutcomeUpdatePayload)
@@ -455,6 +472,8 @@ enum ServerEnvelope: Decodable {
             self = .agentProgress(try AgentProgressPayload(from: decoder))
         case "config_response":
             self = .configResponse(try ConfigResponsePayload(from: decoder))
+        case "notification_settings_response":
+            self = .notificationSettingsResponse(try NotificationSettingsPayload(from: decoder))
         case "prompt_logs_response":
             self = .promptLogsResponse(try PromptLogsResponsePayload(from: decoder))
         case "prompt_log_update":
@@ -502,6 +521,8 @@ enum ServerEnvelope: Decodable {
             return nil
         case .configResponse:
             return "config_response"
+        case .notificationSettingsResponse:
+            return "notification_settings_response"
         case .promptLogsResponse:
             return "prompt_logs_response"
         case .promptLogUpdate:
@@ -547,6 +568,8 @@ enum ServerEnvelope: Decodable {
             return "agent_progress"
         case .configResponse:
             return "config_response"
+        case .notificationSettingsResponse:
+            return "notification_settings_response"
         case .promptLogsResponse:
             return "prompt_logs_response"
         case .promptLogUpdate:

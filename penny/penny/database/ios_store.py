@@ -76,6 +76,7 @@ class IosStore:
         source_hint: str | None,
         push_title: str,
         push_summary: str,
+        notification_category: str = "collector",
     ) -> IosOutboxItem:
         """Append a message to the durable iOS outbox."""
         with self._session() as session:
@@ -89,6 +90,7 @@ class IosStore:
                 source_hint=source_hint,
                 push_title=push_title,
                 push_summary=push_summary,
+                notification_category=notification_category,
                 created_at=datetime.now(UTC),
             )
             session.add(row)

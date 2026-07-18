@@ -78,6 +78,8 @@ from penny.channels.ios.models import (
     IOS_MSG_TYPE_HEARTBEAT,
     IOS_MSG_TYPE_HISTORY,
     IOS_MSG_TYPE_MESSAGE,
+    IOS_MSG_TYPE_NOTIFICATION_SETTINGS,
+    IOS_MSG_TYPE_NOTIFICATION_SETTINGS_UPDATE,
     IOS_MSG_TYPE_PULL,
     IOS_MSG_TYPE_REGISTER,
     IosAckMessages,
@@ -89,6 +91,7 @@ from penny.channels.ios.models import (
     IosIncomingMessage,
     IosMessages,
     IosMessagesAcked,
+    IosNotificationSettingsUpdate,
     IosOutboxChanged,
     IosOutboxRecord,
     IosPullMessages,
@@ -97,6 +100,7 @@ from penny.channels.ios.models import (
     IosStatus,
     IosTyping,
 )
+from penny.channels.ios.notification_coordinator import IosNotificationCoordinator
 from penny.channels.permission_manager import PermissionManager
 from penny.config_params import RUNTIME_CONFIG_PARAMS, get_params_by_group
 from penny.constants import ChannelType, PennyConstants
@@ -171,6 +175,8 @@ class IosChannel(MessageChannel):
         self._port = port
         self._pairing_token = pairing_token
         self._apns_client = apns_client
+        self.notification_coordinator = IosNotificationCoordinator(db, apns_client)
+        self.notification_coordinator.set_channel(self)
         self._is_primary_channel = is_primary_channel
         self._server: Server | None = None
         self._connections: dict[str, IosConnectionInfo] = {}
@@ -278,6 +284,10 @@ class IosChannel(MessageChannel):
             await self._handle_config_request(ws)
         elif msg_type == BROWSER_MSG_TYPE_CONFIG_UPDATE:
             await self._handle_config_update(ws, data)
+        elif msg_type == IOS_MSG_TYPE_NOTIFICATION_SETTINGS:
+            await self._handle_notification_settings(ws)
+        elif msg_type == IOS_MSG_TYPE_NOTIFICATION_SETTINGS_UPDATE:
+            await self._handle_notification_settings_update(ws, data)
         elif msg_type == BROWSER_MSG_TYPE_PROMPT_LOGS_REQUEST:
             await self._handle_prompt_logs_request(ws, data)
         elif msg_type == BROWSER_MSG_TYPE_MEMORIES_REQUEST:
@@ -419,6 +429,27 @@ class IosChannel(MessageChannel):
             session.commit()
         logger.info("Config updated via iOS: %s = %s", req.key, validated)
         await self._handle_config_request(ws)
+
+    async def _handle_notification_settings(self, ws: ServerConnection) -> None:
+        await self._send_json(
+            ws,
+            {"type": "notification_settings_response", **self._db.ios_notifications.settings()},
+        )
+
+    async def _handle_notification_settings_update(self, ws: ServerConnection, data: dict) -> None:
+        try:
+            request = IosNotificationSettingsUpdate(**data)
+            settings = self._db.ios_notifications.update(
+                request.global_interval_seconds, request.categories
+            )
+        except (ValidationError, ValueError) as error:
+            await self._send_json(
+                ws, {"type": "status", "error": f"invalid_notification_settings: {error}"}
+            )
+            return
+        payload = {"type": "notification_settings_response", **settings}
+        for conn in self._connections.values():
+            await self._send_json(conn.ws, payload)
 
     _PROMPT_LOG_PAGE_SIZE = 50
 
@@ -940,6 +971,7 @@ class IosChannel(MessageChannel):
             await self._send_ws(ws, IosStatus(error="register_required"))
             return
         count = self._db.ios.mark_acked(conn.device_id, msg.ids)
+        self._db.ios_notifications.cancel_empty()
         await self._send_ws(ws, IosMessagesAcked(count=count))
 
     def _cleanup_connection(self, ws: ServerConnection, device_identifier: str | None) -> None:
@@ -990,8 +1022,7 @@ class IosChannel(MessageChannel):
         conn = self._connections.get(recipient)
         if conn is not None:
             await self._send_outbox_changed(conn)
-        else:
-            await self._send_push_preview(device.id, item)
+        await self.notification_coordinator.deliver_new_item(item, connected=conn is not None)
         return item.id
 
     async def _send_test_push(self, recipient: str) -> int | None:
@@ -1011,7 +1042,9 @@ class IosChannel(MessageChannel):
             return None
 
         logger.info("Sending test iOS push notification to %s (outbox_id=%s)", recipient, item.id)
-        await self._send_push_preview(device.id, item)
+        await self.notification_coordinator.deliver_new_item(
+            item, connected=recipient in self._connections, force_push=True
+        )
         return item.id
 
     def _enqueue_ios_outbox_item(
@@ -1024,6 +1057,7 @@ class IosChannel(MessageChannel):
         source_name: str | None,
     ) -> IosOutboxItem:
         source_type, source_hint = _source_metadata(source_name)
+        notification_category = _notification_category(source_name)
         push_title, push_summary = _push_preview(message)
         return self._db.ios.enqueue_outbox(
             message_log_id=message_log_id,
@@ -1035,7 +1069,11 @@ class IosChannel(MessageChannel):
             source_hint=source_hint,
             push_title=push_title,
             push_summary=push_summary,
+            notification_category=notification_category,
         )
+
+    def is_connected_device(self, device_id: int) -> bool:
+        return any(info.device_id == device_id for info in self._connections.values())
 
     async def _send_outbox_changed(self, conn: IosConnectionInfo) -> None:
         pending = self._db.ios.pending_count(conn.device_id)
@@ -1322,6 +1360,18 @@ def _source_metadata(source_name: str | None) -> tuple[str | None, str | None]:
     if source_name == PennyConstants.MEMORY_NOTIFIER_COLLECTION:
         return SOURCE_TYPE_COLLECTOR, SOURCE_HINT_NOTIFIER
     return SOURCE_TYPE_COLLECTOR, f"{SOURCE_HINT_COLLECTOR_PREFIX}{source_name}"
+
+
+def _notification_category(source_name: str | None) -> str:
+    if source_name == PennyConstants.CHAT_AGENT_NAME or source_name is None:
+        return "chat"
+    if source_name == SOURCE_NAME_STARTUP:
+        return "startup"
+    if source_name == SOURCE_NAME_TEST_PUSH:
+        return "test_push"
+    if source_name == PennyConstants.MEMORY_THOUGHTS_COLLECTION:
+        return "thoughts"
+    return "collector"
 
 
 def _push_preview(message: str) -> tuple[str, str]:

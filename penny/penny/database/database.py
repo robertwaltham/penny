@@ -10,6 +10,7 @@ from penny.config_params import RuntimeParams
 from penny.database.cursor_store import CursorStore
 from penny.database.device_store import DeviceStore
 from penny.database.domain_permission_store import DomainPermissionStore
+from penny.database.ios_notification_store import IosNotificationStore
 from penny.database.ios_store import IosStore
 from penny.database.media_store import MediaStore
 from penny.database.memory import Memory, MemoryStore
@@ -47,6 +48,7 @@ class Database:
         self.devices = DeviceStore(self.engine)
         self.domain_permissions = DomainPermissionStore(self.engine)
         self.ios = IosStore(self.engine)
+        self.ios_notifications = IosNotificationStore(self.engine)
         self.media = MediaStore(self.engine)
         # The registry-mutation ledger (#1560) and the send queue (#1634) are both
         # constructed before ``memories`` so the memory store can record

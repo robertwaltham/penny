@@ -23,6 +23,29 @@ struct ConfigResponsePayload: Decodable {
     let params: [RuntimeConfigParam]
 }
 
+struct NotificationCategorySetting: Codable, Identifiable {
+    var id: String
+    var enabled: Bool
+    var overrideSeconds: Int?
+    var effectiveIntervalSeconds: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, enabled
+        case overrideSeconds = "override_seconds"
+        case effectiveIntervalSeconds = "effective_interval_seconds"
+    }
+}
+
+struct NotificationSettingsPayload: Codable {
+    var globalIntervalSeconds: Int
+    var categories: [NotificationCategorySetting]
+
+    private enum CodingKeys: String, CodingKey {
+        case globalIntervalSeconds = "global_interval_seconds"
+        case categories
+    }
+}
+
 enum RunOutcome: String, Codable {
     case failed
     case noWork = "no_work"

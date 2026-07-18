@@ -130,11 +130,18 @@ class ApnsClient:
         title: str,
         body: str,
         badge: int,
-        outbox_id: int,
+        outbox_id: int | None,
         source_type: str | None,
         source_name: str | None,
         thread_id: str | None = None,
         environment: str | None = None,
+        notification_kind: str = "preview",
+        batch_id: int | None = None,
+        category: str | None = None,
+        count: int | None = None,
+        collapse_id: str | None = None,
+        alert: bool = True,
+        sound: str | None = "default",
     ) -> None:
         """Send a visible preview notification for one outbox row.
 
@@ -142,14 +149,22 @@ class ApnsClient:
         vs. production), falling back to the global default when the device did
         not report a recognized value.
         """
+        aps: dict[str, Any] = {"badge": badge}
+        if alert:
+            aps["alert"] = {"title": title, "body": body}
+        if sound and alert:
+            aps["sound"] = sound
         payload: dict[str, Any] = {
-            "aps": {
-                "alert": {"title": title, "body": body},
-                "badge": badge,
-                "sound": "default",
-            },
+            "aps": aps,
             "outbox_id": outbox_id,
+            "notification_kind": notification_kind,
         }
+        if batch_id is not None:
+            payload["batch_id"] = batch_id
+        if category:
+            payload["category"] = category
+        if count is not None:
+            payload["count"] = count
         if thread_id:
             payload["aps"]["thread-id"] = thread_id
         if source_type:
@@ -158,14 +173,17 @@ class ApnsClient:
             payload["source_name"] = source_name
 
         resolved_environment = self._environment_for(environment)
+        request_headers = {
+            "authorization": f"bearer {self._provider_token(resolved_environment)}",
+            "apns-topic": self._config.topic_for(resolved_environment),
+            "apns-push-type": "alert",
+            "apns-priority": "10",
+        }
+        if collapse_id:
+            request_headers["apns-collapse-id"] = collapse_id
         response = await self._http.post(
             f"https://{resolved_environment.host}/3/device/{device_token}",
-            headers={
-                "authorization": f"bearer {self._provider_token(resolved_environment)}",
-                "apns-topic": self._config.topic_for(resolved_environment),
-                "apns-push-type": "alert",
-                "apns-priority": "10",
-            },
+            headers=request_headers,
             json=payload,
         )
         if response.status_code < 300:

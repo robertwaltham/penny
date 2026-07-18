@@ -327,6 +327,24 @@ class Penny:
                 requires_idle=True,
             ),
         ]
+        ios_channel = (
+            self.channel
+            if isinstance(self.channel, IosChannel)
+            else (
+                self.channel.get_channel(ChannelType.IOS)
+                if isinstance(self.channel, ChannelManager)
+                else None
+            )
+        )
+        if isinstance(ios_channel, IosChannel):
+            schedules.insert(
+                0,
+                PeriodicSchedule(
+                    agent=ios_channel.notification_coordinator,
+                    interval=lambda: 30.0,
+                    requires_idle=False,
+                ),
+            )
         self.scheduler = BackgroundScheduler(
             schedules=schedules,
             idle_threshold=lambda: config.runtime.IDLE_SECONDS,
