@@ -27,17 +27,122 @@ class IosNotificationCoordinator:
     def set_channel(self, channel) -> None:
         self._channel = channel
 
+    async def send_test_push(
+        self,
+        device_id: int,
+        *,
+        title: str,
+        body: str,
+        source_type: str,
+        source_name: str,
+    ) -> bool:
+        """Send a diagnostic APNs notification without persisting an outbox item."""
+        if self._apns is None:
+            logger.info("Skipping iOS test push: APNs client unavailable (device_id=%s)", device_id)
+            return False
+        registration = self._db.ios.get_registration(device_id)
+        if registration is None:
+            logger.warning("Skipping iOS test push: no push registration (device_id=%s)", device_id)
+            return False
+        if not registration.push_enabled or not registration.apns_token:
+            logger.warning(
+                "Skipping iOS test push: push unavailable "
+                "(device_id=%s, push_enabled=%s, has_apns_token=%s)",
+                device_id,
+                registration.push_enabled,
+                bool(registration.apns_token),
+            )
+            return False
+
+        badge = self._db.ios.pending_count(device_id)
+        try:
+            logger.info(
+                "Sending iOS test push to APNs (device_id=%s, source_type=%s, "
+                "source_name=%s, environment=%s, badge=%s)",
+                device_id,
+                source_type,
+                source_name,
+                registration.apns_environment,
+                badge,
+            )
+            await self._apns.send_preview(
+                device_token=registration.apns_token,
+                title=title,
+                body=body,
+                badge=badge,
+                outbox_id=None,
+                source_type=source_type,
+                source_name=source_name,
+                thread_id=f"penny-{source_name}",
+                environment=registration.apns_environment,
+                notification_kind="test_push",
+                category="test_push",
+            )
+        except ApnsError as error:
+            logger.warning(
+                "APNs rejected iOS test push (device_id=%s, status=%s, reason=%s)",
+                device_id,
+                error.status_code,
+                error.reason,
+            )
+            if error.invalid_token:
+                self._db.ios.disable_push(device_id)
+            return False
+        except Exception as error:
+            logger.warning(
+                "iOS test push delivery failed (device_id=%s, error=%s)", device_id, error
+            )
+            return False
+
+        logger.info("APNs test push sent successfully (device_id=%s)", device_id)
+        return True
+
     async def deliver_new_item(
         self, item: IosOutboxItem, *, connected: bool, force_push: bool = False
     ) -> None:
         if self._apns is None or item.id is None:
+            logger.info(
+                "Skipping iOS APNs notification (device_id=%s, outbox_id=%s, apns_client=%s)",
+                item.device_id,
+                item.id,
+                self._apns is not None,
+            )
             return
         if connected and not force_push:
+            logger.info(
+                "Skipping iOS APNs notification: device connected (device_id=%s, outbox_id=%s)",
+                item.device_id,
+                item.id,
+            )
             return
         registration = self._db.ios.get_registration(item.device_id)
-        if registration is None or not registration.push_enabled or not registration.apns_token:
+        if registration is None:
+            logger.warning(
+                "Skipping iOS APNs notification: no push registration (device_id=%s, outbox_id=%s)",
+                item.device_id,
+                item.id,
+            )
+            return
+        if not registration.push_enabled or not registration.apns_token:
+            logger.warning(
+                "Skipping iOS APNs notification: push unavailable "
+                "(device_id=%s, outbox_id=%s, push_enabled=%s, has_apns_token=%s)",
+                item.device_id,
+                item.id,
+                registration.push_enabled,
+                bool(registration.apns_token),
+            )
             return
         category = item.notification_category
+        logger.info(
+            "Dispatching iOS notification (device_id=%s, outbox_id=%s, category=%s, "
+            "force_push=%s, environment=%s)",
+            item.device_id,
+            item.id,
+            category,
+            force_push,
+            registration.apns_environment,
+        )
         if force_push or category in {"chat", "test_push"}:
             await self._send(item, registration, notification_kind="preview")
             return
@@ -141,6 +246,11 @@ class IosNotificationCoordinator:
             item_id = item.id
             assert item_id is not None
             self._db.ios.mark_push_sent(item_id)
+            logger.info(
+                "APNs preview sent successfully (device_id=%s, outbox_id=%s)",
+                item.device_id,
+                item_id,
+            )
             return True
         except ApnsError as error:
             item_id = item.id

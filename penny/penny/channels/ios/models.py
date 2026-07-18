@@ -11,6 +11,7 @@ IOS_MSG_TYPE_HISTORY = "history_request"
 IOS_MSG_TYPE_MESSAGE = "message"
 IOS_MSG_TYPE_PULL = "pull_messages"
 IOS_MSG_TYPE_REGISTER = "register"
+IOS_MSG_TYPE_TEST_PUSH = "test_push"
 IOS_MSG_TYPE_NOTIFICATION_SETTINGS = "notification_settings_request"
 IOS_MSG_TYPE_NOTIFICATION_SETTINGS_UPDATE = "notification_settings_update"
 

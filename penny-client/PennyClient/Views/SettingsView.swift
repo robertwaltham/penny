@@ -61,6 +61,13 @@ struct SettingsView: View {
 
                     LabeledContent("APNs Host", value: viewModel.apnsHost)
 
+                    Button {
+                        viewModel.sendTestPush()
+                    } label: {
+                        Label("Send Test Push", systemImage: "bell.badge")
+                    }
+                    .disabled(!viewModel.client.canSend)
+
                     TextField("Username", text: $viewModel.username)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()

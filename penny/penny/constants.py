@@ -450,6 +450,10 @@ class PennyConstants:
     # messages on the iOS surface (``channels/ios/channel.py``).  No longer a member
     # of ``SYSTEM_COLLECTIONS`` — there is no archived shell left to hide.
     MEMORY_NOTIFIER_COLLECTION = "notifier"
+    # Retained as a source-name classifier for historical and migrated outgoing
+    # messages. The collection itself was removed by migration 0097, but its
+    # notification category remains part of the iOS notification policy.
+    MEMORY_THOUGHTS_COLLECTION = "thoughts"
     # The one surviving built-in preference extractor (seeded by migration 0027):
     # very narrow and specific, so it stays where the generic catch-alls (likes,
     # knowledge, thoughts, and the retired notifier/quality/skills/thoughts-pair

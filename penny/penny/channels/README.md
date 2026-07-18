@@ -194,9 +194,9 @@ use `IOS_BUNDLE_ID`.
 
 ### Diagnostics
 
-When testing APNs from the iOS client, send a normal `message` whose content is
-`send me a test push`, `test push`, or `send a test notification`. Penny bypasses
-the chat agent and forces an APNs test notification to the registered device even
+When testing APNs from the iOS client, use the **Send Test Push** button in the
+Settings → Connection section. The client sends a dedicated `test_push` message
+type, and Penny forces an APNs test notification to the registered device even
 when the WebSocket is currently connected.
 
 ## Discord configuration

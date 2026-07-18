@@ -6,6 +6,7 @@ typealias PennyWebSocketClient = PennyService
 enum ClientMessage: Encodable {
     case register(RegisterPayload)
     case message(content: String)
+    case testPush
     case pullMessages(limit: Int)
     case historyRequest(limit: Int, before: String?, channelTypes: [String]?, includeAttachments: Bool, countOnly: Bool)
     case ackMessages(ids: [Int])
@@ -67,6 +68,8 @@ enum ClientMessage: Encodable {
         case .message(let content):
             try container.encode("message", forKey: .type)
             try container.encode(content, forKey: .content)
+        case .testPush:
+            try container.encode("test_push", forKey: .type)
         case .pullMessages(let limit):
             try container.encode("pull_messages", forKey: .type)
             try container.encode(limit, forKey: .limit)
@@ -204,6 +207,8 @@ enum ClientMessage: Encodable {
             return "registered"
         case .message:
             return "messages:outbox"
+        case .testPush:
+            return nil
         case .pullMessages:
             return "messages:outbox"
         case .historyRequest:
@@ -243,6 +248,8 @@ enum ClientMessage: Encodable {
             return "register"
         case .message:
             return "message"
+        case .testPush:
+            return "test_push"
         case .pullMessages:
             return "pull_messages"
         case .historyRequest:

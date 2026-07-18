@@ -273,6 +273,10 @@ final class SettingsViewModel {
         client.updateNotificationSettings(settings)
     }
 
+    func sendTestPush() {
+        client.sendTestPush()
+    }
+
     func saveConnection() {
         guard canSaveConnection else { return }
         prefs.webSocketURL = webSocketURL.trimmingCharacters(in: .whitespacesAndNewlines)

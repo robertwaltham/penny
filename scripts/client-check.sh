@@ -7,7 +7,16 @@
 # fails with FBSOpenApplicationServiceErrorDomain "failed preflight checks".
 set -euo pipefail
 
-BUILD_INFO_DERIVED_DATA=""
+BUILD_INFO_DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/penny-client-check.XXXXXX")"
+UDID=""
+cleanup() {
+    if [ -n "$UDID" ]; then
+        xcrun simctl shutdown "$UDID" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$BUILD_INFO_DERIVED_DATA"
+}
+trap cleanup EXIT
+
 UDID=$(xcodebuild -project penny-client/PennyClient.xcodeproj -scheme PennyClient -showdestinations 2>&1 \
     | awk -F'[{},]' '
         /platform:iOS Simulator/ && /name:iPhone/ && !found {
@@ -33,16 +42,19 @@ xcrun simctl shutdown all >/dev/null 2>&1 || true
 xcrun simctl erase "$UDID"
 xcrun simctl boot "$UDID"
 xcrun simctl bootstatus "$UDID" -b
-trap 'xcrun simctl shutdown "$UDID" >/dev/null 2>&1 || true; if [ -n "$BUILD_INFO_DERIVED_DATA" ]; then rm -rf "$BUILD_INFO_DERIVED_DATA"; fi' EXIT
+
+swift build \
+    --package-path penny-client/SQLPropertyMacros \
+    --build-path "$BUILD_INFO_DERIVED_DATA/SQLPropertyMacros"
 
 xcodebuild test \
     -project penny-client/PennyClient.xcodeproj \
     -scheme PennyClient \
     -destination "id=$UDID" \
+    -derivedDataPath "$BUILD_INFO_DERIVED_DATA" \
     -skipMacroValidation \
     -skipPackagePluginValidation
 
-BUILD_INFO_DERIVED_DATA="$(mktemp -d)"
 EXPECTED_COMMIT_HASH="VERIFYHASH1234"
 xcodebuild build \
     -project penny-client/PennyClient.xcodeproj \

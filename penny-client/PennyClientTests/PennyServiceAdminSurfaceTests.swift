@@ -18,6 +18,15 @@ struct PennyServiceAdminSurfaceTests {
         #expect(payloads[1]["value"] == .string("0.2"))
     }
 
+    @Test func testPushEncodesDedicatedFrame() async throws {
+        let (service, transport) = makeSubject()
+
+        service.sendTestPush()
+
+        let payloads = await sentPayloads(transport, count: 1)
+        #expect(payloads[0]["type"] == .string("test_push"))
+    }
+
     @Test func promptLogRequestEncodesFilters() async throws {
         let (service, transport) = makeSubject()
 

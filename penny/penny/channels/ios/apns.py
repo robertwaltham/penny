@@ -156,9 +156,10 @@ class ApnsClient:
             aps["sound"] = sound
         payload: dict[str, Any] = {
             "aps": aps,
-            "outbox_id": outbox_id,
             "notification_kind": notification_kind,
         }
+        if outbox_id is not None:
+            payload["outbox_id"] = outbox_id
         if batch_id is not None:
             payload["batch_id"] = batch_id
         if category:

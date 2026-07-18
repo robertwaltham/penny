@@ -328,6 +328,10 @@ extension PennyService {
         send(.message(content: content))
     }
 
+    func sendTestPush() {
+        send(.testPush)
+    }
+
     func requestConfig() {
         send(.configRequest)
     }

@@ -24,6 +24,7 @@ from penny.channels.ios.models import (
     IOS_MSG_TYPE_HISTORY,
     IOS_MSG_TYPE_PULL,
     IOS_MSG_TYPE_REGISTER,
+    IOS_MSG_TYPE_TEST_PUSH,
     IOS_RESP_TYPE_MESSAGES,
     IOS_RESP_TYPE_OUTBOX_CHANGED,
     IOS_RESP_TYPE_REGISTERED,
@@ -373,6 +374,11 @@ async def test_send_raw_queues_outbox_and_sends_push_preview_when_disconnected(t
         "Sending iOS preview notification to APNs" in record.message
         and f"outbox_id={external_id}" in record.message
         and "source_name=flight-deals" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "APNs preview sent successfully" in record.message
+        and f"outbox_id={external_id}" in record.message
         for record in caplog.records
     )
     device = db.devices.get_by_identifier("ios-keychain-id")
@@ -773,7 +779,7 @@ async def test_send_raw_logs_and_disables_push_when_apns_rejects_token(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_test_push_phrase_forces_apns_even_when_websocket_connected(tmp_path):
+async def test_test_push_message_forces_apns_even_when_websocket_connected(tmp_path):
     db = _make_db(tmp_path)
     apns = FakeApns()
     channel = _make_channel(db, apns=apns)
@@ -790,22 +796,22 @@ async def test_test_push_phrase_forces_apns_even_when_websocket_connected(tmp_pa
         },
     )
 
-    await channel._handle_chat_message(
-        {"type": "message", "content": "send me a test push"}, "ios-keychain-id"
+    await channel._process_raw_message(
+        cast(Any, ws),
+        json.dumps({"type": IOS_MSG_TYPE_TEST_PUSH}),
+        "ios-keychain-id",
     )
 
     assert len(apns.sent) == 1
     assert apns.sent[0]["device_token"] == "apns-token"
     assert apns.sent[0]["title"] == PUSH_GREETING_TITLE
     assert apns.sent[0]["body"] == TEST_PUSH_MESSAGE
-    assert apns.sent[0]["badge"] == 1
+    assert apns.sent[0]["badge"] == 0
     device = db.devices.get_by_identifier("ios-keychain-id")
     assert device is not None and device.id is not None
     outbox = db.ios.pending_for_device(device.id)
-    assert len(outbox) == 1
-    assert outbox[0].source_type == "test_push"
-    assert outbox[0].source_name == "test_push"
-    assert outbox[0].push_sent_at is not None
+    assert outbox == []
+    assert apns.sent[0]["outbox_id"] is None
 
 
 @pytest.mark.asyncio

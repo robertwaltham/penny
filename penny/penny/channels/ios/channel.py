@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-import httpx
 import websockets
 from pydantic import BaseModel, ValidationError
 from sqlmodel import Session
@@ -71,7 +70,7 @@ from penny.channels.browser.models import (
     MemoryEntryRecord,
     MemoryRecord,
 )
-from penny.channels.ios.apns import ApnsClient, ApnsError
+from penny.channels.ios.apns import ApnsClient
 from penny.channels.ios.models import (
     IOS_MSG_TYPE_ACK,
     IOS_MSG_TYPE_EMBEDDING_REQUEST,
@@ -82,6 +81,7 @@ from penny.channels.ios.models import (
     IOS_MSG_TYPE_NOTIFICATION_SETTINGS_UPDATE,
     IOS_MSG_TYPE_PULL,
     IOS_MSG_TYPE_REGISTER,
+    IOS_MSG_TYPE_TEST_PUSH,
     IosAckMessages,
     IosAgentProgress,
     IosAgentProgressTool,
@@ -270,6 +270,8 @@ class IosChannel(MessageChannel):
             return None
         if msg_type == IOS_MSG_TYPE_MESSAGE:
             await self._handle_chat_message(data, device_identifier)
+        elif msg_type == IOS_MSG_TYPE_TEST_PUSH:
+            await self._send_test_push(device_identifier)
         elif msg_type == IOS_MSG_TYPE_EMBEDDING_REQUEST:
             await self._handle_embedding_request(ws, data)
         elif msg_type == IOS_MSG_TYPE_PULL:
@@ -836,9 +838,6 @@ class IosChannel(MessageChannel):
             msg = IosIncomingMessage(**data)
         except ValidationError:
             return
-        if _is_test_push_request(msg.content):
-            await self._send_test_push(device_identifier)
-            return
         await self.handle_message(
             {
                 "ios_sender": device_identifier,
@@ -1017,35 +1016,48 @@ class IosChannel(MessageChannel):
             message_log_id=message_log_id,
         )
         if item.id is None:
+            logger.warning(
+                "Failed to queue iOS notification (device_id=%s, source_name=%s)",
+                device.id,
+                source_name,
+            )
             return None
 
         conn = self._connections.get(recipient)
+        logger.info(
+            "Queued iOS notification (device_id=%s, outbox_id=%s, connected=%s, "
+            "source_type=%s, source_name=%s)",
+            device.id,
+            item.id,
+            conn is not None,
+            item.source_type,
+            item.source_name,
+        )
         if conn is not None:
             await self._send_outbox_changed(conn)
+            logger.info(
+                "Sent iOS outbox change hint (device_id=%s, outbox_id=%s)",
+                device.id,
+                item.id,
+            )
         await self.notification_coordinator.deliver_new_item(item, connected=conn is not None)
         return item.id
 
-    async def _send_test_push(self, recipient: str) -> int | None:
-        """Force a diagnostic APNs notification for the registered iOS device."""
+    async def _send_test_push(self, recipient: str) -> bool:
+        """Force a diagnostic APNs notification without creating an outbox row."""
         device = self._db.devices.get_by_identifier(recipient)
         if device is None or device.id is None:
             logger.warning("No iOS device for test push recipient: %s", recipient)
-            return None
+            return False
 
-        item = self._enqueue_ios_outbox_item(
-            device_id=device.id,
-            message=TEST_PUSH_MESSAGE,
-            attachments=None,
+        logger.info("Sending test iOS push notification to %s (no outbox row)", recipient)
+        return await self.notification_coordinator.send_test_push(
+            device.id,
+            title=PUSH_GREETING_TITLE,
+            body=TEST_PUSH_MESSAGE,
+            source_type=SOURCE_TYPE_TEST_PUSH,
             source_name=SOURCE_NAME_TEST_PUSH,
         )
-        if item.id is None:
-            return None
-
-        logger.info("Sending test iOS push notification to %s (outbox_id=%s)", recipient, item.id)
-        await self.notification_coordinator.deliver_new_item(
-            item, connected=recipient in self._connections, force_push=True
-        )
-        return item.id
 
     def _enqueue_ios_outbox_item(
         self,
@@ -1078,57 +1090,6 @@ class IosChannel(MessageChannel):
     async def _send_outbox_changed(self, conn: IosConnectionInfo) -> None:
         pending = self._db.ios.pending_count(conn.device_id)
         await self._send_ws(conn.ws, IosOutboxChanged(pending_count=pending))
-
-    async def _send_push_preview(self, device_id: int, item: IosOutboxItem) -> None:
-        """Send APNs preview when possible; record errors but keep outbox durable."""
-        if self._apns_client is None or item.id is None:
-            return
-        registration = self._db.ios.get_registration(device_id)
-        if registration is None or not registration.push_enabled or not registration.apns_token:
-            return
-        try:
-            logger.info(
-                "Sending iOS preview notification to APNs "
-                "(device_id=%s, outbox_id=%s, source_type=%s, source_name=%s)",
-                device_id,
-                item.id,
-                item.source_type,
-                item.source_name,
-            )
-            await self._apns_client.send_preview(
-                device_token=registration.apns_token,
-                title=item.push_title,
-                body=item.push_summary,
-                badge=self._db.ios.pending_count(device_id),
-                outbox_id=item.id,
-                source_type=item.source_type,
-                source_name=item.source_name,
-                thread_id=_thread_id(item.source_name),
-                environment=registration.apns_environment,
-            )
-            self._db.ios.mark_push_sent(item.id)
-        except ApnsError as error:
-            self._db.ios.mark_push_error(item.id, error.reason)
-            if error.invalid_token:
-                logger.warning(
-                    "APNs rejected iOS device token; disabling push "
-                    "(device_id=%s, outbox_id=%s, reason=%s)",
-                    device_id,
-                    item.id,
-                    error.reason,
-                )
-                self._db.ios.disable_push(device_id)
-            else:
-                logger.warning(
-                    "APNs rejected preview notification "
-                    "(device_id=%s, outbox_id=%s, status=%s, reason=%s)",
-                    device_id,
-                    item.id,
-                    error.status_code,
-                    error.reason,
-                )
-        except httpx.HTTPError as error:
-            self._db.ios.mark_push_error(item.id, str(error))
 
     async def send_typing(self, recipient: str, typing: bool) -> bool:
         """Send typing state to a connected iOS client."""
@@ -1393,24 +1354,3 @@ def _strip_markup(message: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"[*_`~#>]", "", text)
     return re.sub(r"\s+", " ", text).strip()
-
-
-def _is_test_push_request(message: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9]+", " ", message.lower()).strip()
-    return normalized in {
-        "send me a test push",
-        "send a test push",
-        "send test push",
-        "test push",
-        "send me a test notification",
-        "send a test notification",
-        "send test notification",
-        "test notification",
-    }
-
-
-def _thread_id(source_name: str | None) -> str | None:
-    if not source_name:
-        return None
-    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", source_name).strip("-")
-    return f"penny-{safe}" if safe else None
