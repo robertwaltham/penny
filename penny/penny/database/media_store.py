@@ -87,7 +87,16 @@ class MediaStore:
         with self._session() as session:
             return session.get(Media, media_id)
 
-    def select_image(self, urls: list[str], embedding: list[float] | None) -> Media | None:
+    def select_image(
+        self,
+        urls: list[str],
+        embedding: list[float] | None,
+        *,
+        allow_exact_url: bool = True,
+        allow_cited_domain: bool = True,
+        allow_embedding_nearest: bool = True,
+        allow_generated: bool = True,
+    ) -> Media | None:
         """Pick the image to attach to an egress message, most-relevant first.
 
         ``urls`` are the links the message itself contains (Penny cites her
@@ -106,29 +115,49 @@ class MediaStore:
         Returns None only when nothing qualifies (no URL match and no embedded
         media), so a reply still carries an image whenever one can be matched.
         """
-        rows = self._candidates()
-        chosen = (
-            self._cited_page_image(rows, urls)
-            or self._cited_domain_image(rows, urls, embedding)
-            or self._jittered_nearest(rows, embedding)
-        )
+        if not (allow_exact_url or allow_cited_domain or allow_embedding_nearest):
+            return None
+
+        chosen = None
+        if allow_exact_url:
+            exact_rows = self._candidates(allow_generated=allow_generated, include_embeddings=False)
+            chosen = self._cited_page_image(exact_rows, urls)
+            if chosen is not None:
+                return self.get(chosen)
+
+        if not (allow_cited_domain or allow_embedding_nearest):
+            return None
+
+        rows = self._candidates(allow_generated=allow_generated, include_embeddings=True)
+        if chosen is None and allow_cited_domain:
+            chosen = self._cited_domain_image(rows, urls, embedding)
+        if chosen is None and allow_embedding_nearest:
+            chosen = self._jittered_nearest(rows, embedding)
         return self.get(chosen) if chosen is not None else None
 
-    def _candidates(self) -> list[_Candidate]:
+    def _candidates(
+        self, *, allow_generated: bool = True, include_embeddings: bool = True
+    ) -> list[_Candidate]:
         """Every media row as a lightweight candidate (no ``data`` blob)."""
         with self._session() as session:
-            rows = session.exec(
-                select(Media.id, Media.source_url, Media.created_at, Media.embedding)
-            ).all()
+            columns = [Media.id, Media.source_url, Media.created_at]
+            if include_embeddings:
+                columns.append(Media.embedding)
+            statement = select(*columns)
+            if not allow_generated:
+                statement = statement.where(Media.source_url.is_not(None))
+            rows = session.exec(statement).all()
         return [
             _Candidate(
                 id=row[0],
                 source_url=row[1] or "",
                 created_at=row[2],
-                vector=deserialize_embedding(row[3]) if row[3] else None,
+                vector=(deserialize_embedding(row[3]) if row[3] else None)
+                if include_embeddings
+                else None,
             )
             for row in rows
-            if row[0] is not None
+            if row[0] is not None and (allow_generated or row[1] is not None)
         ]
 
     def _cited_page_image(self, rows: list[_Candidate], urls: list[str]) -> int | None:

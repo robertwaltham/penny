@@ -102,7 +102,7 @@ from penny.channels.ios.models import (
 )
 from penny.channels.ios.notification_coordinator import IosNotificationCoordinator
 from penny.channels.permission_manager import PermissionManager
-from penny.config_params import RUNTIME_CONFIG_PARAMS, get_params_by_group
+from penny.config_params import RUNTIME_CONFIG_PARAMS, format_runtime_value, get_params_by_group
 from penny.constants import ChannelType, PennyConstants
 from penny.database.memory import (
     EntryInput,
@@ -388,8 +388,8 @@ class IosChannel(MessageChannel):
                 params.append(
                     {
                         "key": param.key,
-                        "value": str(current),
-                        "default": str(param.default),
+                        "value": format_runtime_value(current),
+                        "default": format_runtime_value(param.default),
                         "description": param.description,
                         "type": param.type.__name__,
                         "group": group,
@@ -416,14 +416,14 @@ class IosChannel(MessageChannel):
         with Session(self._db.engine) as session:
             existing = session.get(RuntimeConfig, req.key)
             if existing:
-                existing.value = str(validated)
+                existing.value = format_runtime_value(validated)
                 existing.updated_at = datetime.utcnow()
                 session.add(existing)
             else:
                 session.add(
                     RuntimeConfig(
                         key=req.key,
-                        value=str(validated),
+                        value=format_runtime_value(validated),
                         description=param.description,
                         updated_at=datetime.utcnow(),
                     )

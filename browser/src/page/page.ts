@@ -1167,11 +1167,15 @@ function createConfigItem(param: RuntimeConfigParam): HTMLElement {
   const input = document.createElement("input");
   input.id = `config-${param.key}`;
   input.className = "config-input";
-  input.type = param.type === "str" ? "text" : "number";
+  input.type = param.type === "str" ? "text" : param.type === "bool" ? "checkbox" : "number";
   if (param.type === "int") input.step = "1";
   if (param.type === "float") input.step = "any";
-  input.value = param.value;
-  input.placeholder = param.default;
+  if (param.type === "bool") {
+    input.checked = param.value === "true";
+  } else {
+    input.value = param.value;
+    input.placeholder = param.default;
+  }
   if (param.value !== param.default) input.classList.add("modified");
 
   input.addEventListener("change", () => {
@@ -1179,7 +1183,7 @@ function createConfigItem(param: RuntimeConfigParam): HTMLElement {
     browser.runtime.sendMessage({
       type: RuntimeMessageType.ConfigUpdate,
       key: param.key,
-      value: input.value,
+      value: param.type === "bool" ? String(input.checked) : input.value,
     });
   });
 

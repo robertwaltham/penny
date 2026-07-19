@@ -258,6 +258,11 @@ final class SettingsViewModel {
         editedConfigValues[param.key] = value
     }
 
+    func setBooleanConfigValue(_ enabled: Bool, for param: RuntimeConfigParam) {
+        setConfigValue(enabled ? "true" : "false", for: param)
+        saveConfigValue(for: param)
+    }
+
     func saveConfigValue(for param: RuntimeConfigParam) {
         let value = configValue(for: param).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }

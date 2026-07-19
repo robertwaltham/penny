@@ -22,6 +22,7 @@ async def test_config_list(signal_server, test_config, mock_llm, running_penny):
         assert "**Memory**" in response["message"]
         assert "MAX_STEPS" in response["message"]
         assert "IDLE_SECONDS" in response["message"]
+        assert "SEND_IMAGE_EXACT_URL_ENABLED" in response["message"]
         assert "Use `/config <key> <value>` to change a setting" in response["message"]
 
 

@@ -158,8 +158,20 @@ struct SettingsView: View {
                     if viewModel.runtimeConfigParams.isEmpty {
                         ContentUnavailableView("No Config", systemImage: "slider.horizontal.3")
                     } else {
-                        ForEach(viewModel.runtimeConfigParams) { param in
-                            RuntimeConfigRow(param: param, viewModel: viewModel)
+                        let groups = viewModel.runtimeConfigParams.reduce(into: [(String, [RuntimeConfigParam])]()) { result, param in
+                            if let index = result.firstIndex(where: { $0.0 == param.group }) {
+                                result[index].1.append(param)
+                            } else {
+                                result.append((param.group, [param]))
+                            }
+                        }
+                        ForEach(groups.indices, id: \.self) { index in
+                            Text(groups[index].0)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            ForEach(groups[index].1) { param in
+                                RuntimeConfigRow(param: param, viewModel: viewModel)
+                            }
                         }
                     }
                 }
@@ -330,16 +342,21 @@ private struct RuntimeConfigRow: View {
             Text(param.description)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack {
-                TextField("Value", text: valueBinding)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                Button {
-                    viewModel.saveConfigValue(for: param)
-                } label: {
-                    Image(systemName: "checkmark.circle")
+            if param.type == "bool" {
+                Toggle("Enabled", isOn: boolBinding)
+                    .accessibilityLabel(param.description)
+            } else {
+                HStack {
+                    TextField("Value", text: valueBinding)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button {
+                        viewModel.saveConfigValue(for: param)
+                    } label: {
+                        Image(systemName: "checkmark.circle")
+                    }
+                    .accessibilityLabel("Save config value")
                 }
-                .accessibilityLabel("Save config value")
             }
         }
         .padding(.vertical, 4)
@@ -350,6 +367,14 @@ private struct RuntimeConfigRow: View {
             viewModel.configValue(for: param)
         } set: { newValue in
             viewModel.setConfigValue(newValue, for: param)
+        }
+    }
+
+    private var boolBinding: Binding<Bool> {
+        Binding {
+            viewModel.configValue(for: param).lowercased() == "true"
+        } set: { newValue in
+            viewModel.setBooleanConfigValue(newValue, for: param)
         }
     }
 }

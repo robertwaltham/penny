@@ -1013,6 +1013,23 @@ class TestMediaStore:
         match = db.media.select_image(["https://cited.test/p"], None)
         assert match is not None and match.id == cited
 
+    def test_select_image_exact_url_does_not_deserialize_embeddings(self, tmp_path, monkeypatch):
+        db = _make_db(tmp_path)
+        self._put(db, b"exact", "https://cited.test/p", [1.0, 0.0])
+
+        def fail_deserialize(_value):
+            raise AssertionError("exact URL matching should not deserialize embeddings")
+
+        monkeypatch.setattr("penny.database.media_store.deserialize_embedding", fail_deserialize)
+        match = db.media.select_image(
+            ["https://cited.test/p"],
+            None,
+            allow_cited_domain=False,
+            allow_embedding_nearest=False,
+        )
+        assert match is not None
+        assert match.data == b"exact"
+
     def test_select_image_prefers_cited_domain_nearest(self, tmp_path):
         """Tier 2: the message links a page on a domain we have images from (but
         not that exact page) — pick the embedding-nearest image of that domain,
@@ -1063,6 +1080,44 @@ class TestMediaStore:
         assert db.media.select_image([], [1.0, 0.0]) is None  # no embedded media to fall back to
         assert db.media.select_image([], None) is None  # nothing to match at all
         assert db.media.select_image(["https://nope.test/x"], [1.0, 0.0]) is None  # url misses
+
+    def test_select_image_skips_disabled_tiers_and_generated_rows(self, tmp_path):
+        db = _make_db(tmp_path)
+        generated = self._put(db, b"generated", None, [1.0, 0.0])
+        cited = self._put(db, b"cited", "https://site.test/page", [0.9, 0.1])
+
+        match = db.media.select_image(
+            ["https://site.test/other"],
+            [1.0, 0.0],
+            allow_exact_url=False,
+            allow_cited_domain=False,
+            allow_embedding_nearest=True,
+            allow_generated=False,
+        )
+
+        assert match is not None
+        assert match.id == cited
+        assert match.id != generated
+
+    def test_select_image_returns_without_loading_candidates_when_all_tiers_disabled(
+        self, tmp_path, monkeypatch
+    ):
+        db = _make_db(tmp_path)
+
+        def fail_candidates(*args, **kwargs):
+            raise AssertionError("candidate scan should be skipped")
+
+        monkeypatch.setattr(db.media, "_candidates", fail_candidates)
+        assert (
+            db.media.select_image(
+                [],
+                [1.0, 0.0],
+                allow_exact_url=False,
+                allow_cited_domain=False,
+                allow_embedding_nearest=False,
+            )
+            is None
+        )
 
 
 class TestWriteTypeEnforcement:

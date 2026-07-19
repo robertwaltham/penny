@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from penny.commands.base import Command
 from penny.commands.models import CommandContext, CommandResult
-from penny.config_params import RUNTIME_CONFIG_PARAMS, get_params_by_group
+from penny.config_params import RUNTIME_CONFIG_PARAMS, format_runtime_value, get_params_by_group
 from penny.responses import PennyResponse
 
 
@@ -43,7 +43,7 @@ class ConfigCommand(Command):
                     lines.append(
                         PennyResponse.CONFIG_PARAM_DISPLAY.format(
                             key=param.key,
-                            value=current_value,
+                            value=format_runtime_value(current_value),
                             description=param.description,
                         )
                     )
@@ -60,7 +60,9 @@ class ConfigCommand(Command):
 
             param = RUNTIME_CONFIG_PARAMS[key]
             current_value = getattr(context.config.runtime, key)
-            return CommandResult(text=f"**{key}**: {current_value} ({param.description})")
+            return CommandResult(
+                text=f"**{key}**: {format_runtime_value(current_value)} ({param.description})"
+            )
 
         # Case 3: Set config value
         key = parts[0].upper()
@@ -82,13 +84,13 @@ class ConfigCommand(Command):
             existing = session.exec(select(RuntimeConfig).where(RuntimeConfig.key == key)).first()
 
             if existing:
-                existing.value = str(parsed_value)
+                existing.value = format_runtime_value(parsed_value)
                 existing.updated_at = datetime.now(UTC)
                 session.add(existing)
             else:
                 new_config = RuntimeConfig(
                     key=key,
-                    value=str(parsed_value),
+                    value=format_runtime_value(parsed_value),
                     description=param.description,
                     updated_at=datetime.now(UTC),
                 )
@@ -97,4 +99,8 @@ class ConfigCommand(Command):
             session.commit()
 
         # Config changes take effect immediately via RuntimeParams DB lookup
-        return CommandResult(text=PennyResponse.CONFIG_UPDATED.format(key=key, value=parsed_value))
+        return CommandResult(
+            text=PennyResponse.CONFIG_UPDATED.format(
+                key=key, value=format_runtime_value(parsed_value)
+            )
+        )

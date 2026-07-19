@@ -497,6 +497,16 @@ class TestBrowserConfigHandlers:
         assert "silence" in param["description"].lower()
         assert param["group"] == "Background"
 
+        image_param = next(
+            p
+            for p in ws.sent[0]["params"]
+            if p["key"] == "SEND_IMAGE_EXACT_URL_ENABLED"
+        )
+        assert image_param["type"] == "bool"
+        assert image_param["value"] == "true"
+        assert image_param["default"] == "true"
+        assert image_param["group"] == "Send"
+
     @pytest.mark.asyncio
     async def test_config_update_persists_value(self, tmp_path):
         """config_update writes the validated value to the runtime_config table."""

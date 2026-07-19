@@ -172,7 +172,7 @@ export interface RuntimeConfigParam {
   value: string;
   default: string;
   description: string;
-  type: "int" | "float" | "str";
+  type: "int" | "float" | "str" | "bool";
   group: string;
 }
 

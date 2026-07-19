@@ -11,10 +11,11 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from penny.config import Config
+from penny.config_params import RUNTIME_CONFIG_PARAMS, RuntimeParams
 from penny.constants import PennyConstants
 from penny.database.models import Media, MessageLog
 from penny.llm import LlmClient
@@ -41,6 +42,40 @@ class PageContext(BaseModel):
     title: str
     url: str
     text: str
+
+
+class AttachmentPolicy(BaseModel):
+    """Runtime policy controlling outgoing image sources."""
+
+    model_config = ConfigDict(frozen=True)
+
+    exact_url: bool = True
+    cited_domain: bool = True
+    embedding_nearest: bool = True
+    generated: bool = True
+    tool_image: bool = True
+
+    @classmethod
+    def from_runtime(cls, runtime: RuntimeParams | None) -> AttachmentPolicy:
+        if runtime is None:
+            values = {key: param.default for key, param in RUNTIME_CONFIG_PARAMS.items()}
+        else:
+            values = runtime.get_many(
+                [
+                    "SEND_IMAGE_EXACT_URL_ENABLED",
+                    "SEND_IMAGE_CITED_DOMAIN_ENABLED",
+                    "SEND_IMAGE_EMBEDDING_NEAREST_ENABLED",
+                    "SEND_GENERATED_IMAGE_ENABLED",
+                    "SEND_TOOL_IMAGE_ENABLED",
+                ]
+            )
+        return cls(
+            exact_url=bool(values["SEND_IMAGE_EXACT_URL_ENABLED"]),
+            cited_domain=bool(values["SEND_IMAGE_CITED_DOMAIN_ENABLED"]),
+            embedding_nearest=bool(values["SEND_IMAGE_EMBEDDING_NEAREST_ENABLED"]),
+            generated=bool(values["SEND_GENERATED_IMAGE_ENABLED"]),
+            tool_image=bool(values["SEND_TOOL_IMAGE_ENABLED"]),
+        )
 
 
 class IncomingMessage(BaseModel):
@@ -322,6 +357,8 @@ class MessageChannel(ABC):
         Returns the platform external id (or None on failure).
         """
         prepared = self.prepare_outgoing(content)
+        if attachments and not self._attachment_policy().tool_image:
+            attachments = None
         embedding = await self._embed_message(prepared) if prepared.strip() else None
         _, external_id = await self._log_and_send(
             recipient,
@@ -373,7 +410,9 @@ class MessageChannel(ABC):
         # Embed once: stored on the messagelog row (the penny-messages facade's
         # read_similar ranks on it) and reused for nearest-image matching.
         embedding = await self._embed_message(prepared)
-        attachments = self._resolve_media(attachments, prepared, embedding, media_ids)
+        attachments = self._resolve_media(
+            attachments, prepared, embedding, media_ids, self._attachment_policy()
+        )
         message_id, external_id = await self._log_and_send(
             recipient,
             prepared,
@@ -442,6 +481,7 @@ class MessageChannel(ABC):
         text: str,
         embedding: list[float] | None,
         media_ids: list[int] | None = None,
+        policy: AttachmentPolicy | None = None,
     ) -> list[str] | None:
         """Resolve the image(s) to attach to this reply, most-authoritative first.
 
@@ -455,16 +495,31 @@ class MessageChannel(ABC):
            jittered embedding-nearest pick — so every reply carries an image
            whenever one can be matched.
         """
-        if attachments:
+        policy = policy or self._attachment_policy()
+        if attachments and policy.tool_image:
             return attachments
-        generated = self._encode_media(media_ids) if media_ids else None
+        generated = self._encode_media(media_ids) if media_ids and policy.generated else None
         if generated:
             return generated
+        if not (policy.exact_url or policy.cited_domain or policy.embedding_nearest):
+            return None
         urls = _MESSAGE_URL_RE.findall(text)
-        media = self._db.media.select_image(urls, embedding)
+        media = self._db.media.select_image(
+            urls,
+            embedding,
+            allow_exact_url=policy.exact_url,
+            allow_cited_domain=policy.cited_domain,
+            allow_embedding_nearest=policy.embedding_nearest,
+            allow_generated=policy.generated,
+        )
         if media is None:
             return None
         return [self._encode_media_row(media)]
+
+    def _attachment_policy(self) -> AttachmentPolicy:
+        """Read one coherent attachment-policy snapshot for this send."""
+        runtime = self._config.runtime if self._config is not None else None
+        return AttachmentPolicy.from_runtime(runtime)
 
     def _encode_media(self, media_ids: list[int]) -> list[str] | None:
         """Fetch each generated media row by id and encode it as a data URI.

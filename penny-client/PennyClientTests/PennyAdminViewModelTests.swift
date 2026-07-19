@@ -202,6 +202,37 @@ struct PennyAdminViewModelTests {
         #expect(prefs.password == "new-secret")
         client.disconnect()
     }
+
+    @Test func settingsViewModelSavesBooleanRuntimeConfigCanonically() async throws {
+        let prefs = configuredPrefs(url: "wss://old.example/penny/", username: "alice", password: "secret")
+        let (client, transport) = makeAdminClient(prefs: prefs)
+        await connectAndClearStartupFrames(client, transport)
+        let viewModel = SettingsViewModel(client: client, prefs: prefs)
+
+        transport.emit("""
+        {
+          "type": "config_response",
+          "params": [{
+            "key": "SEND_GENERATED_IMAGE_ENABLED",
+            "value": "false",
+            "default": "true",
+            "description": "Allow generated images",
+            "type": "bool",
+            "group": "Send"
+          }]
+        }
+        """)
+
+        let param = try #require(viewModel.runtimeConfigParams.first)
+        #expect(viewModel.configValue(for: param) == "false")
+        viewModel.setBooleanConfigValue(true, for: param)
+
+        let payloads = await sentPayloads(transport, count: 1)
+        #expect(payloads[0]["type"] == .string("config_update"))
+        #expect(payloads[0]["key"] == .string("SEND_GENERATED_IMAGE_ENABLED"))
+        #expect(payloads[0]["value"] == .string("true"))
+        client.disconnect()
+    }
 }
 
 @MainActor

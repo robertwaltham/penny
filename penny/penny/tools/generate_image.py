@@ -23,6 +23,7 @@ import base64
 import logging
 from typing import TYPE_CHECKING, Any
 
+from penny.config_params import RuntimeParams
 from penny.constants import PennyConstants
 from penny.llm.embeddings import serialize_embedding
 from penny.llm.similarity import embed_text
@@ -68,14 +69,32 @@ class GenerateImageTool(Tool):
     args_model = GenerateImageArgs
 
     def __init__(
-        self, image_client: OllamaImageClient, db: Database, embedding_client: LlmClient
+        self,
+        image_client: OllamaImageClient,
+        db: Database,
+        embedding_client: LlmClient,
+        runtime: RuntimeParams | None = None,
     ) -> None:
         self._image_client = image_client
         self._db = db
         self._embedding_client = embedding_client
+        self._runtime = runtime
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         """Generate the image, store it for egress, and confirm what was drawn."""
+        if (
+            self._runtime is not None
+            and not self._runtime.get_many(["SEND_GENERATED_IMAGE_ENABLED"])[
+                "SEND_GENERATED_IMAGE_ENABLED"
+            ]
+        ):
+            return ToolResult(
+                message=(
+                    "Image generation is disabled by runtime configuration. "
+                    "Set SEND_GENERATED_IMAGE_ENABLED=true to re-enable it."
+                ),
+                success=False,
+            )
         args = GenerateImageArgs(**kwargs)
         image_b64 = await self._image_client.generate_image(prompt=args.description)
         media_id = await self._store_media(args.description, image_b64)

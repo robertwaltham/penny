@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from penny.config import Config
+from penny.config_params import RuntimeParams, format_runtime_value
 from penny.constants import ChannelType, PennyConstants
 from penny.llm import LlmClient
 
@@ -200,3 +201,30 @@ class TestMaxStepsEnvWiring:
         config = Config.load()
 
         assert config.runtime.MAX_STEPS == 20
+
+
+class TestAttachmentRuntimeConfig:
+    def test_boolean_values_parse_and_serialize_canonically(self):
+        runtime = RuntimeParams(
+            env_overrides={
+                "SEND_IMAGE_EXACT_URL_ENABLED": True,
+                "SEND_IMAGE_CITED_DOMAIN_ENABLED": False,
+                "SEND_TOOL_IMAGE_ENABLED": False,
+            }
+        )
+
+        values = runtime.get_many(
+            [
+                "SEND_IMAGE_EXACT_URL_ENABLED",
+                "SEND_IMAGE_CITED_DOMAIN_ENABLED",
+                "SEND_TOOL_IMAGE_ENABLED",
+            ]
+        )
+
+        assert values == {
+            "SEND_IMAGE_EXACT_URL_ENABLED": True,
+            "SEND_IMAGE_CITED_DOMAIN_ENABLED": False,
+            "SEND_TOOL_IMAGE_ENABLED": False,
+        }
+        assert format_runtime_value(True) == "true"
+        assert format_runtime_value(False) == "false"

@@ -131,9 +131,17 @@ class ChatAgent(Agent):
         tools.append(NotificationsUnmuteTool(self.db))
         if self._collector is not None:
             tools.append(TestExtractionPromptTool(self._collector))
-        if self._image_client is not None:
+        generated_enabled = self.config.runtime.get_many(["SEND_GENERATED_IMAGE_ENABLED"])[
+            "SEND_GENERATED_IMAGE_ENABLED"
+        ]
+        if self._image_client is not None and generated_enabled:
             tools.append(
-                GenerateImageTool(self._image_client, self.db, self._embedding_model_client)
+                GenerateImageTool(
+                    self._image_client,
+                    self.db,
+                    self._embedding_model_client,
+                    runtime=self.config.runtime,
+                )
             )
         tools.extend(self._email_tools())
         return tools
