@@ -4,27 +4,6 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-public struct AgentProgressToolItem: Identifiable {
-    public let id = UUID()
-    public let name: String
-    public let arguments: [String: AgentProgressValue]
-}
-
-public struct AgentProgressStepItem: Identifiable {
-    public let id = UUID()
-    public let number: Int
-    public let maxSteps: Int?
-    public var tools: [AgentProgressToolItem] = []
-    public var thinking: String?
-}
-
-public struct AgentProgressRunItem: Identifiable {
-    public let id: String
-    public let agent: String
-    public let scope: AgentProgressScope
-    public var steps: [AgentProgressStepItem] = []
-}
-
 @MainActor
 @Observable
 public final class PennyService {
@@ -64,11 +43,16 @@ public final class PennyService {
     public var agentProgressRuns: [String: AgentProgressRunItem] = [:]
 
     public var foregroundProgress: AgentProgressRunItem? {
-        agentProgressRuns.values.first(where: { $0.scope == .foreground })
+        foregroundActivityRuns.last(where: \.isRunning)
+    }
+
+    public var foregroundActivityRuns: [AgentProgressRunItem] {
+        agentProgressRuns.values.filter { $0.scope == .foreground }.sorted { $0.startedAt < $1.startedAt }
     }
 
     public var backgroundProgressRuns: [AgentProgressRunItem] {
-        agentProgressRuns.values.filter { $0.scope == .background }.sorted { $0.id < $1.id }
+        agentProgressRuns.values.filter { $0.scope == .background && $0.isRunning }
+            .sorted { $0.startedAt < $1.startedAt }
     }
     public var lastError: String?
     public var runtimeConfigParams: [RuntimeConfigParam] = []
@@ -219,7 +203,11 @@ extension PennyService {
         isRegistered = false
         isTyping = false
         conversationState = nil
-        agentProgressRuns.removeAll()
+        agentProgressRuns = agentProgressRuns.filter { $0.value.scope == .foreground }.mapValues { run in
+            var retainedRun = run
+            if retainedRun.isRunning { retainedRun.state = .interrupted }
+            return retainedRun
+        }
     }
 
     public func requestMessagePage(_ request: MessagePageRequest) async -> MessagePage {
@@ -680,6 +668,13 @@ extension PennyService {
         }
     }
 
+    private func resumableProgressRun(_ runID: String) -> AgentProgressRunItem? {
+        guard var run = agentProgressRuns[runID] else { return nil }
+        if case .finished = run.state { return nil }
+        run.state = .running
+        return run
+    }
+
     private func applyAgentProgress(_ payload: AgentProgressPayload) {
         switch payload.event {
         case .runStarted:
@@ -690,12 +685,12 @@ extension PennyService {
                 scope: payload.scope
             )
         case .stepStarted:
-            guard var run = agentProgressRuns[payload.runID], let step = payload.step else { return }
+            guard var run = resumableProgressRun(payload.runID), let step = payload.step else { return }
             guard !run.steps.contains(where: { $0.number == step }) else { return }
             run.steps.append(AgentProgressStepItem(number: step, maxSteps: payload.maxSteps))
             agentProgressRuns[payload.runID] = run
         case .toolsStarted:
-            guard var run = agentProgressRuns[payload.runID] else { return }
+            guard var run = resumableProgressRun(payload.runID) else { return }
             guard let step = payload.step ?? run.steps.last?.number,
                   let index = run.steps.firstIndex(where: { $0.number == step }) else { return }
             run.steps[index].tools.append(contentsOf: payload.tools.map {
@@ -703,14 +698,20 @@ extension PennyService {
             })
             agentProgressRuns[payload.runID] = run
         case .thinkingUpdated:
-            guard var run = agentProgressRuns[payload.runID],
+            guard var run = resumableProgressRun(payload.runID),
                   let step = payload.step,
                   let index = run.steps.firstIndex(where: { $0.number == step }),
                   let thinking = payload.thinking else { return }
             run.steps[index].thinking = thinking
             agentProgressRuns[payload.runID] = run
         case .runFinished:
-            agentProgressRuns.removeValue(forKey: payload.runID)
+            guard var run = agentProgressRuns[payload.runID] else { return }
+            if run.scope == .foreground {
+                run.state = .finished(payload.outcome)
+                agentProgressRuns[payload.runID] = run
+            } else {
+                agentProgressRuns.removeValue(forKey: payload.runID)
+            }
         }
     }
 
@@ -898,12 +899,22 @@ extension PennyService {
     }
 
     private func send(_ outgoingMessage: ClientMessage) {
+        // New progress may arrive while sending; clear only the runs known at send time.
+        let previousActivityIDs: [String]
+        if case .message = outgoingMessage {
+            previousActivityIDs = foregroundActivityRuns.map(\.id)
+        } else {
+            previousActivityIDs = []
+        }
         Task {
             do {
                 let data = try encoder.encode(outgoingMessage)
                 let pendingResponse = recordPendingResponse(for: outgoingMessage)
                 do {
                     try await webSocketClient.send(data)
+                    for runID in previousActivityIDs {
+                        agentProgressRuns.removeValue(forKey: runID)
+                    }
                 } catch {
                     removePendingResponse(pendingResponse)
                     throw error

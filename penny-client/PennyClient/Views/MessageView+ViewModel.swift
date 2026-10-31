@@ -132,8 +132,9 @@ extension MessageView {
             self.messagePageSize = max(1, messagePageSize)
         }
 
-        var shouldShowTypingIndicator: Bool {
-            selectedMessageFilter == .all || selectedMessageFilter == .chat
+        var shouldShowAgentActivity: Bool {
+            (selectedMessageFilter == .all || selectedMessageFilter == .chat)
+                && (client.isTyping || !client.foregroundActivityRuns.isEmpty)
         }
 
         var composerPresentation: ComposerPresentation {

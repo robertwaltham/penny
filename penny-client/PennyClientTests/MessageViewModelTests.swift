@@ -263,8 +263,12 @@ struct MessageViewModelTests {
         viewModel.selectedMessageFilter = .penny
         viewModel.draftMessage = "   \n  "
 
+        client.agentProgressRuns["previous"] = AgentProgressRunItem(
+            id: "previous", agent: "chat", scope: .foreground, state: .finished(.completed)
+        )
         viewModel.sendDraft()
 
+        #expect(client.foregroundActivityRuns.map(\.id) == ["previous"])
         #expect(viewModel.selectedMessageFilter == .penny)
         #expect(viewModel.draftMessage == "   \n  ")
         #expect(client.messages.isEmpty)
@@ -329,19 +333,26 @@ struct MessageViewModelTests {
         #expect(viewModel.displayedMessages.map(\.content) == ["Schedule update"])
     }
 
-    @Test func typingIndicatorVisibilityReflectsSelectedFilter() {
-        let viewModel = MessageView.ViewModel(client: PennyWebSocketClient(databaseService: configuredDatabase(), prefs: configuredPrefs()))
-
-        #expect(viewModel.shouldShowTypingIndicator)
+    @Test func agentActivityVisibilityReflectsFilterAndRetainedRuns() {
+        let client = PennyWebSocketClient(databaseService: configuredDatabase(), prefs: configuredPrefs())
+        let viewModel = MessageView.ViewModel(client: client)
+        #expect(viewModel.shouldShowAgentActivity == false)
+        client.isTyping = true
+        #expect(viewModel.shouldShowAgentActivity)
+        client.isTyping = false
+        client.agentProgressRuns["retained"] = AgentProgressRunItem(
+            id: "retained", agent: "chat", scope: .foreground, state: .finished(.completed)
+        )
+        #expect(viewModel.shouldShowAgentActivity)
 
         viewModel.selectedMessageFilter = .chat
-        #expect(viewModel.shouldShowTypingIndicator)
+        #expect(viewModel.shouldShowAgentActivity)
 
         viewModel.selectedMessageFilter = .penny
-        #expect(viewModel.shouldShowTypingIndicator == false)
+        #expect(viewModel.shouldShowAgentActivity == false)
 
         viewModel.selectedMessageFilter = .collector
-        #expect(viewModel.shouldShowTypingIndicator == false)
+        #expect(viewModel.shouldShowAgentActivity == false)
     }
 
     @Test func searchHistoryDefaultsToCompactAndLoadsSelectedFilter() async {

@@ -13,10 +13,6 @@ struct MessageView: View {
     @State private var messageActionProxyHeights: [Int: CGFloat] = [:]
     @State private var messageContextScale: CGFloat = 1
     @State private var keyboardSettledScrollTask: Task<Void, Never>?
-    @State private var typingIndicatorStatus = "Penny is typing"
-    @State private var isTypingIndicatorVisible = false
-    @State private var isTypingIndicatorFadingOut = false
-    @State private var typingIndicatorFadeTask: Task<Void, Never>?
     @State private var arrivalAnimatedMessageIDs: Set<Int> = []
     @State private var pendingIncomingAutoScrollMessageID: Int?
     @State private var lastTopScrolledMessageID: Int?
@@ -115,7 +111,6 @@ struct MessageView: View {
         }
         .onDisappear {
             keyboardSettledScrollTask?.cancel()
-            typingIndicatorFadeTask?.cancel()
         }
     }
 
@@ -135,8 +130,11 @@ struct MessageView: View {
                         }
                     }
 
-                    if isTypingIndicatorVisible && viewModel.shouldShowTypingIndicator {
-                        TypingRow(status: typingIndicatorStatus, isFadingOut: isTypingIndicatorFadingOut)
+                    if viewModel.shouldShowAgentActivity {
+                        AgentActivityCard(
+                            runs: viewModel.client.foregroundActivityRuns,
+                            isTyping: viewModel.client.isTyping
+                        )
                     }
 
                     bottomSpacer
@@ -156,17 +154,17 @@ struct MessageView: View {
             .coordinateSpace(name: messageScrollCoordinateSpace)
             .scrollDismissesKeyboard(.interactively)
             .onAppear {
-                updateTypingIndicator(isTyping: viewModel.client.isTyping)
                 scheduleScrollToBottom(with: proxy, animated: false)
             }
-            .onChange(of: viewModel.client.isTyping) { _, isTyping in
-                updateTypingIndicator(isTyping: isTyping)
+            .onChange(of: viewModel.client.isTyping) { _, _ in
                 if viewModel.isAtBottom {
                     scheduleScrollToBottom(with: proxy, shouldSettleLayout: false)
                 }
             }
-            .onChange(of: viewModel.client.foregroundProgress?.currentStatus) { _, status in
-                updateTypingIndicatorStatus(status)
+            .onChange(of: viewModel.client.foregroundActivityRuns) { _, _ in
+                if viewModel.isAtBottom {
+                    scheduleScrollToBottom(with: proxy, shouldSettleLayout: false)
+                }
             }
             .onChange(of: viewModel.displayedMessages.map(\.id)) { previousIDs, currentIDs in
                 let previousPendingMessageID = pendingIncomingAutoScrollMessageID
@@ -185,37 +183,6 @@ struct MessageView: View {
         }
     }
 
-    private func updateTypingIndicator(isTyping: Bool) {
-        typingIndicatorFadeTask?.cancel()
-
-        if isTyping {
-            typingIndicatorStatus = currentTypingStatus
-            isTypingIndicatorVisible = true
-            withAnimation(.easeOut(duration: 0.16)) {
-                isTypingIndicatorFadingOut = false
-            }
-            return
-        }
-
-        guard isTypingIndicatorVisible else { return }
-
-        withAnimation(.easeOut(duration: 0.35)) {
-            isTypingIndicatorFadingOut = true
-        }
-
-        typingIndicatorFadeTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else { return }
-            isTypingIndicatorVisible = false
-            isTypingIndicatorFadingOut = false
-        }
-    }
-
-    private func updateTypingIndicatorStatus(_ status: String?) {
-        guard viewModel.client.isTyping else { return }
-        typingIndicatorStatus = status ?? "Penny is typing"
-    }
-
     private func prepareArrivalAnimations(previousIDs: [Int], currentIDs: [Int]) {
         guard !previousIDs.isEmpty, currentIDs.count > previousIDs.count else { return }
         let appendedIDs = currentIDs.dropFirst(previousIDs.count)
@@ -229,10 +196,6 @@ struct MessageView: View {
 
         arrivalAnimatedMessageIDs.formUnion(incomingIDs)
         pendingIncomingAutoScrollMessageID = incomingIDs.last
-    }
-
-    private var currentTypingStatus: String {
-        viewModel.client.foregroundProgress?.currentStatus ?? "Penny is typing"
     }
 
     private var dataBrowserButton: some View {
@@ -298,7 +261,7 @@ struct MessageView: View {
     }
 
     private var hasAgentActivity: Bool {
-        viewModel.client.isTyping || !viewModel.client.agentProgressRuns.isEmpty
+        viewModel.client.isTyping || viewModel.client.agentProgressRuns.values.contains(where: \.isRunning)
     }
 
     private var composer: some View {
@@ -1033,171 +996,6 @@ private struct IncomingMessageArrivalModifier: ViewModifier {
             onAnimationFinished()
         }
     }
-}
-
-private struct TypingRow: View {
-    let status: String
-    let isFadingOut: Bool
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 6) {
-            Text(status)
-                .id(status)
-                .font(.subheadline)
-                .multilineTextAlignment(.leading)
-                .transition(.opacity)
-            Spacer(minLength: 8)
-            TypingDots()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .opacity(isFadingOut ? 0 : 1)
-        .animation(.easeInOut(duration: 0.14), value: status)
-        .accessibilityLabel("Penny is typing")
-    }
-}
-
-private struct TypingDots: View {
-    private let dotCount = 3
-    private let cycleDuration = 0.9
-    private let dotDelay = 0.16
-    private let jumpDuration = 0.36
-
-    var body: some View {
-        TimelineView(.animation) { timeline in
-            let elapsedTime = timeline.date.timeIntervalSinceReferenceDate
-
-            HStack(spacing: 3) {
-                ForEach(0..<dotCount, id: \.self) { index in
-                    let progress = dotProgress(elapsedTime: elapsedTime, index: index)
-
-                    Circle()
-                        .fill(Color.secondary)
-                        .frame(width: 5, height: 5)
-                        .offset(y: -4 * sin(progress * .pi))
-                        .opacity(0.45 + (0.35 * sin(progress * .pi)))
-                }
-            }
-        }
-        .frame(width: 21, height: 12)
-        .accessibilityHidden(true)
-    }
-
-    private func dotProgress(elapsedTime: TimeInterval, index: Int) -> Double {
-        let delayedTime = elapsedTime - (Double(index) * dotDelay)
-        let cycleTime = delayedTime.truncatingRemainder(dividingBy: cycleDuration)
-        let normalizedCycleTime = cycleTime < 0 ? cycleTime + cycleDuration : cycleTime
-
-        guard normalizedCycleTime < jumpDuration else {
-            return 0
-        }
-
-        return normalizedCycleTime / jumpDuration
-    }
-}
-
-private struct AgentActivityView: View {
-    let client: PennyService
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Connection") {
-                    LabeledContent("Status", value: client.statusText)
-
-                    if let error = client.lastError {
-                        Text(error)
-                            .font(.subheadline)
-                            .foregroundStyle(.red)
-
-                        Button("Reconnect", systemImage: "arrow.clockwise") {
-                            client.reconnect()
-                        }
-                    }
-                }
-
-                if let foreground = client.foregroundProgress {
-                    Section("Current message") {
-                        progressRun(foreground)
-                    }
-                }
-
-                Section("Background work") {
-                    if client.backgroundProgressRuns.isEmpty {
-                        Text("Nothing is running")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(client.backgroundProgressRuns) { run in
-                            progressRun(run)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Agent activity")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-
-    @ViewBuilder
-    private func progressRun(_ run: AgentProgressRunItem) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(run.agent.capitalized)
-                .font(.headline)
-            ForEach(run.steps) { step in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(step.maxSteps.map { "Step \(step.number) of \($0)" } ?? "Step \(step.number)")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    ForEach(step.tools) { tool in
-                            Label(agentProgressToolLabel(tool), systemImage: "arrow.triangle.2.circlepath")
-                            .font(.subheadline)
-                    }
-                }
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-}
-
-private extension AgentProgressRunItem {
-    var currentStatus: String {
-        guard let step = steps.last else { return "Penny is working" }
-        if let tool = step.tools.last { return agentProgressToolLabel(tool) }
-        return step.maxSteps.map { "Working · step \(step.number) of \($0)" } ?? "Working · step \(step.number)"
-    }
-}
-
-private func agentProgressToolLabel(_ tool: AgentProgressToolItem) -> String {
-    switch tool.name {
-    case "browse":
-        if case .array(let queries)? = tool.arguments["queries"],
-           let query = queries.compactMap({ value in
-               if case .string(let string) = value { return string }
-               return nil
-           }).first {
-            return formattedURLHost(from: query).map { "Reading \($0)" } ?? "Searching \"\(query)\""
-        }
-        return "Looking up"
-    case "search_emails": return "Searching emails"
-    case "read_emails": return "Reading emails"
-    case "list_emails": return "Listing emails"
-    case "list_folders": return "Listing email folders"
-    case "draft_email": return "Drafting an email"
-    case "generate_image": return "Generating an image"
-    default:
-        if case .string(let detail)? = tool.arguments["detail"], let host = formattedURLHost(from: detail) {
-            return "Using \(tool.name) · \(host)"
-        }
-        return "Using \(tool.name)"
-    }
-}
-
-private func formattedURLHost(from string: String) -> String? {
-    guard let components = URLComponents(string: string), let host = components.host else { return nil }
-    return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
 }
 
 #Preview {

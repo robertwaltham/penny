@@ -691,13 +691,13 @@ public enum AgentProgressScope: String, Decodable {
     case background
 }
 
-enum AgentProgressOutcome: String, Decodable {
+public enum AgentProgressOutcome: String, Decodable {
     case completed
     case maxSteps = "max_steps"
     case error
 }
 
-public enum AgentProgressValue: Decodable {
+public enum AgentProgressValue: Decodable, Equatable {
     case string(String)
     case number(Double)
     case bool(Bool)

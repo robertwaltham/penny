@@ -8,10 +8,16 @@ in an optional `thinking` string, keyed by `run_id` and `step` (also carrying
 steps and final answers; no event is sent when thinking is absent. Traces arrive
 after the step's model call finishes, rather than token by token. Foreground
 updates go to the requesting device; background updates go to connected devices.
-The service retains thinking on active steps without displaying it in the typing
-card or activity sheet. Progress remains ephemeral and clears on run finish or
-disconnect; durable traces remain in the server's prompt logs. Older clients skip
-the new event, and the new client accepts existing events without `thinking`.
+The chat activity card lists steps, tool calls, and thinking previews that expand
+into selectable full traces. The activity sheet uses the same rows. Foreground
+activity remains visible through completion and disconnect/reconnect, and clears
+only after the next message is successfully sent. Failed sends, empty drafts,
+and unrelated requests preserve it. A new run arriving during a send is retained.
+Completed activity stops animating; connection loss marks a running entry as
+interrupted. Background work remains an active-run list in the activity sheet.
+This history is held in memory for the current app session; durable traces remain
+in the server's prompt logs. Older clients skip the new event, and the new client
+accepts existing events without `thinking`.
 
 Build and test from the repo root with `make client-check` (requires Xcode; runs
 the standalone service tests, app-hosted `PennyClientTests`, and the Testflight

@@ -407,7 +407,7 @@ struct PennyWebSocketClientTests {
         #expect(client.statusText == "boom")
     }
 
-    @Test func agentProgressAccumulatesStepsAndClearsOnFinish() async {
+    @Test func agentProgressAccumulatesStepsAndRetainsForegroundOnFinish() async {
         let transport = MessagePagingMockTransport()
         let client = PennyWebSocketClient(
             databaseService: configuredDatabase(),
@@ -438,7 +438,8 @@ struct PennyWebSocketClientTests {
         transport.emit("""
         {"type":"agent_progress","event":"run_finished","run_id":"run-1","agent":"chat","scope":"foreground","outcome":"completed","tools":[]}
         """)
-        #expect(client.agentProgressRuns.isEmpty)
+        #expect(client.foregroundProgress == nil)
+        #expect(client.foregroundActivityRuns.first?.state == .finished(.completed))
     }
 
     @Test func thinkingProgressUpdatesOnlyTheMatchingActiveStep() async {
@@ -480,7 +481,8 @@ struct PennyWebSocketClientTests {
         transport.emit("""
         {"type":"agent_progress","event":"run_finished","run_id":"run-thinking","agent":"chat","scope":"foreground","outcome":"completed","tools":[]}
         """)
-        #expect(client.agentProgressRuns.isEmpty)
+        #expect(client.foregroundProgress == nil)
+        #expect(client.foregroundActivityRuns.first?.steps.first?.thinking == "Check the source.\nThen answer. ✓")
     }
 
     @Test func typingPayloadUpdatesTypingState() async {
