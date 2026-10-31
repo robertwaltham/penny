@@ -1,6 +1,18 @@
 # penny-client
 iOS client for the penny personal assistant
 
+Agent status uses the existing `agent_progress` websocket message. After a model
+step returns thinking text, `event: "thinking_updated"` carries the complete trace
+in an optional `thinking` string, keyed by `run_id` and `step` (also carrying
+`agent`, `scope`, `max_steps`, and an empty `tools` array). This covers both tool
+steps and final answers; no event is sent when thinking is absent. Traces arrive
+after the step's model call finishes, rather than token by token. Foreground
+updates go to the requesting device; background updates go to connected devices.
+The service retains thinking on active steps without displaying it in the typing
+card or activity sheet. Progress remains ephemeral and clears on run finish or
+disconnect; durable traces remain in the server's prompt logs. Older clients skip
+the new event, and the new client accepts existing events without `thinking`.
+
 Build and test from the repo root with `make client-check` (requires Xcode; runs
 the standalone service tests, app-hosted `PennyClientTests`, and the Testflight
 build verification on a freshly booted simulator). For service-only changes,

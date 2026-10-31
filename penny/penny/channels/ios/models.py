@@ -190,6 +190,7 @@ class IosAgentProgress(BaseModel):
     max_steps: int | None = None
     tools: list[IosAgentProgressTool] = Field(default_factory=list)
     outcome: str | None = None
+    thinking: str | None = None
 
 
 class IosDataReadRequest(BaseModel):

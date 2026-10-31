@@ -682,6 +682,7 @@ enum AgentProgressEventType: String, Decodable {
     case runStarted = "run_started"
     case stepStarted = "step_started"
     case toolsStarted = "tools_started"
+    case thinkingUpdated = "thinking_updated"
     case runFinished = "run_finished"
 }
 
@@ -748,6 +749,7 @@ struct AgentProgressPayload: Decodable {
     let maxSteps: Int?
     let tools: [AgentProgressToolPayload]
     let outcome: AgentProgressOutcome?
+    let thinking: String?
 
     private enum CodingKeys: String, CodingKey {
         case event
@@ -758,5 +760,6 @@ struct AgentProgressPayload: Decodable {
         case maxSteps = "max_steps"
         case tools
         case outcome
+        case thinking
     }
 }

@@ -1269,6 +1269,7 @@ class IosChannel(MessageChannel):
             max_steps=event.max_steps,
             tools=tools,
             outcome=event.outcome,
+            thinking=event.thinking,
         )
         connections = (
             [self._connections.get(recipient)]

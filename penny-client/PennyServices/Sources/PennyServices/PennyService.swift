@@ -15,6 +15,7 @@ public struct AgentProgressStepItem: Identifiable {
     public let number: Int
     public let maxSteps: Int?
     public var tools: [AgentProgressToolItem] = []
+    public var thinking: String?
 }
 
 public struct AgentProgressRunItem: Identifiable {
@@ -700,6 +701,13 @@ extension PennyService {
             run.steps[index].tools.append(contentsOf: payload.tools.map {
                 AgentProgressToolItem(name: $0.name, arguments: $0.arguments)
             })
+            agentProgressRuns[payload.runID] = run
+        case .thinkingUpdated:
+            guard var run = agentProgressRuns[payload.runID],
+                  let step = payload.step,
+                  let index = run.steps.firstIndex(where: { $0.number == step }),
+                  let thinking = payload.thinking else { return }
+            run.steps[index].thinking = thinking
             agentProgressRuns[payload.runID] = run
         case .runFinished:
             agentProgressRuns.removeValue(forKey: payload.runID)

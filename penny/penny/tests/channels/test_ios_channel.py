@@ -276,6 +276,7 @@ async def test_agent_progress_is_redacted_and_connection_scoped(db):
     )
     assert len(foreground.sent) == 2
     assert len(other.sent) == 1
+    assert "thinking" not in other.sent[0]
 
     # A long allowed argument is redacted to the named preview bound — the payload
     # is a transient preview, not the data (#2642).
@@ -294,6 +295,47 @@ async def test_agent_progress_is_redacted_and_connection_scoped(db):
     assert foreground.sent[2]["tools"][0]["arguments"] == {
         "subject": long_subject[: PennyConstants.IOS_PROGRESS_REDACT_PREVIEW_CHARS]
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["foreground", "background"])
+async def test_thinking_progress_preserves_trace_and_connection_scope(db, scope):
+    channel = _make_channel(db)
+    requesting = FakeWs()
+    other = FakeWs()
+    for identifier, ws in [("device-a", requesting), ("device-b", other)]:
+        channel._connections[identifier] = IosConnectionInfo(
+            ws=cast(Any, ws), device_id=1, identifier=identifier
+        )
+    trace = "Check the source.\nThen compare the results. ✓ " * 100
+    event = AgentProgressEvent(
+        "thinking_updated",
+        "run-thinking",
+        "chat",
+        scope,
+        step=1,
+        max_steps=4,
+        thinking=trace,
+    )
+    if scope == "foreground":
+        callback = channel.make_foreground_progress_callback("device-a")
+    else:
+        callback, _ = channel.make_background_progress_callback()
+    await callback(event)
+
+    expected = {
+        "type": "agent_progress",
+        "event": "thinking_updated",
+        "run_id": "run-thinking",
+        "agent": "chat",
+        "scope": scope,
+        "step": 1,
+        "max_steps": 4,
+        "tools": [],
+        "thinking": trace,
+    }
+    assert requesting.sent == [expected]
+    assert other.sent == ([expected] if scope == "background" else [])
 
 
 async def _wait_for_server(channel: IosChannel) -> None:

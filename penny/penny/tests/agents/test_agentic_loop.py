@@ -3111,8 +3111,11 @@ class TestOnToolStartCallback:
         await agent.close()
 
     @pytest.mark.asyncio
-    async def test_structured_progress_covers_run_steps_tools_and_finish(self, test_db, mock_llm):
-        """Progress events bracket the loop and identify each tool batch."""
+    @pytest.mark.parametrize("thinking_source", [None, "message", "inline"])
+    async def test_structured_progress_covers_run_steps_tools_and_finish(
+        self, test_db, mock_llm, thinking_source
+    ):
+        """Progress carries each completed step's trace without changing the reply."""
         agent, db, max_steps = _make_agent(test_db, mock_llm, max_steps=3)
         agent._tool_executor.execute = AsyncMock(return_value=ToolResult(message="result"))
         events = []
@@ -3122,8 +3125,16 @@ class TestOnToolStartCallback:
 
         def handler(request, count):
             if count == 1:
-                return mock_llm._make_tool_call_response(request, "search", {"query": "topic"})
-            return mock_llm._make_text_response(request, "done")
+                response = mock_llm._make_tool_call_response(request, "search", {"query": "topic"})
+            else:
+                response = mock_llm._make_text_response(request, "done")
+            # Validation may redraw the final answer; it is still the same loop step.
+            trace = f"Step {1 if count == 1 else 2}: check the source.\nThen answer. ✓"
+            if thinking_source == "message":
+                response.message.thinking = trace
+            elif thinking_source == "inline":
+                response.message.content = f"<think>{trace}</think>{response.content}"
+            return response
 
         mock_llm.set_response_handler(handler)
         response = await agent.run(
@@ -3131,14 +3142,39 @@ class TestOnToolStartCallback:
         )
 
         assert response.answer == "done"
-        assert [event.event for event in events] == [
+        assert [event.event for event in events if event.event != "thinking_updated"] == [
             "run_started",
             "step_started",
             "tools_started",
             "step_started",
             "run_finished",
         ]
-        assert events[2].tools == (("search", {"query": "topic"}),)
+        tool_event = next(event for event in events if event.event == "tools_started")
+        assert tool_event.tools == (("search", {"query": "topic"}),)
+        thinking_events = [event for event in events if event.event == "thinking_updated"]
+        assert [(event.step, event.max_steps, event.thinking) for event in thinking_events] == (
+            [
+                (1, 3, "Step 1: check the source.\nThen answer. ✓"),
+                (2, 3, "Step 2: check the source.\nThen answer. ✓"),
+            ]
+            if thinking_source
+            else []
+        )
+        if thinking_source:
+            assert [event.event for event in events] == [
+                "run_started",
+                "step_started",
+                "thinking_updated",
+                "tools_started",
+                "step_started",
+                "thinking_updated",
+                "run_finished",
+            ]
+            assert all(event.run_id == events[0].run_id for event in thinking_events)
+            assert all(
+                event.agent == agent.name and event.scope == "foreground"
+                for event in thinking_events
+            )
         assert events[-1].outcome == "completed"
 
         await agent.close()

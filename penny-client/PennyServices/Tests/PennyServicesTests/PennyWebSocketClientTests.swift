@@ -432,10 +432,53 @@ struct PennyWebSocketClientTests {
         {"type":"agent_progress","event":"step_started","run_id":"run-1","agent":"chat","scope":"foreground","step":1,"max_steps":4,"tools":[]}
         """)
         #expect(client.foregroundProgress?.steps.count == 1)
+        #expect(client.foregroundProgress?.steps.first?.thinking == nil)
         #expect(client.foregroundProgress?.steps.first?.tools.first?.name == "browse")
 
         transport.emit("""
         {"type":"agent_progress","event":"run_finished","run_id":"run-1","agent":"chat","scope":"foreground","outcome":"completed","tools":[]}
+        """)
+        #expect(client.agentProgressRuns.isEmpty)
+    }
+
+    @Test func thinkingProgressUpdatesOnlyTheMatchingActiveStep() async {
+        let transport = MessagePagingMockTransport()
+        let client = PennyWebSocketClient(
+            databaseService: configuredDatabase(),
+            prefs: configuredPrefs(),
+            webSocketClient: transport
+        )
+        await client.connect()
+        _ = await sentPayloads(transport, count: 2)
+        transport.emit("""
+        {"type":"agent_progress","event":"run_started","run_id":"run-thinking","agent":"chat","scope":"foreground","tools":[]}
+        """)
+        for step in 1...2 {
+            transport.emit("""
+            {"type":"agent_progress","event":"step_started","run_id":"run-thinking","agent":"chat","scope":"foreground","step":\(step),"max_steps":4,"tools":[]}
+            """)
+        }
+        for _ in 1...2 {
+            transport.emit(#"""
+            {"type":"agent_progress","event":"thinking_updated","run_id":"run-thinking","agent":"chat","scope":"foreground","step":1,"tools":[],"thinking":"Check the source.\nThen answer. ✓"}
+            """#)
+        }
+        #expect(client.foregroundProgress?.steps.count == 2)
+        #expect(client.foregroundProgress?.steps.first?.thinking == "Check the source.\nThen answer. ✓")
+        #expect(client.foregroundProgress?.steps.last?.thinking == nil)
+        #expect(client.foregroundProgress?.steps.first?.tools.isEmpty == true)
+
+        for (runID, step, thinking) in [("unknown", 1, "\"ignored\""), ("run-thinking", 3, "\"ignored\""),
+                                        ("run-thinking", 1, "null")] {
+            transport.emit("""
+            {"type":"agent_progress","event":"thinking_updated","run_id":"\(runID)","agent":"chat","scope":"foreground","step":\(step),"tools":[],"thinking":\(thinking)}
+            """)
+        }
+        #expect(client.agentProgressRuns.count == 1)
+        #expect(client.foregroundProgress?.steps.count == 2)
+        #expect(client.foregroundProgress?.steps.first?.thinking == "Check the source.\nThen answer. ✓")
+        transport.emit("""
+        {"type":"agent_progress","event":"run_finished","run_id":"run-thinking","agent":"chat","scope":"foreground","outcome":"completed","tools":[]}
         """)
         #expect(client.agentProgressRuns.isEmpty)
     }

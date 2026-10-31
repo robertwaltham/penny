@@ -140,6 +140,7 @@ class AgentProgressEvent:
     max_steps: int | None = None
     tools: tuple[tuple[str, dict], ...] = ()
     outcome: str | None = None
+    thinking: str | None = None
 
 
 ProgressCallback = Callable[[AgentProgressEvent], Awaitable[None]]
@@ -779,6 +780,9 @@ class Agent:
             # record already holds them — the tail restarts from here.
             logged.turns = len(messages)
 
+            await self._notify_step_thinking(
+                on_progress, response, run_id, progress_scope, step + 1, steps
+            )
             ctx = self._loop_context(
                 step, is_final_step, step_tools, messages, tool_call_records, handles=table
             )
@@ -2060,6 +2064,35 @@ class Agent:
             await on_tool_start([(name, dict(args)) for _, name, args in pending])
         except RuntimeError, ValueError:
             logger.debug("on_tool_start callback failed")
+
+    async def _notify_step_thinking(
+        self,
+        callback: ProgressCallback | None,
+        response: LlmResponse,
+        run_id: str,
+        scope: str,
+        step: int,
+        max_steps: int,
+    ) -> None:
+        """Send the completed step's trace, including final steps without tools."""
+        if callback is None:
+            return
+        thinking = response.thinking or response.message.thinking
+        if not thinking:
+            _, thinking = strip_think_tags(response.content)
+        if thinking:
+            await self._notify_progress(
+                callback,
+                AgentProgressEvent(
+                    "thinking_updated",
+                    run_id,
+                    self.name,
+                    scope,
+                    step=step,
+                    max_steps=max_steps,
+                    thinking=thinking,
+                ),
+            )
 
     async def _notify_progress(
         self, callback: ProgressCallback | None, event: AgentProgressEvent
