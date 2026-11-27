@@ -202,6 +202,15 @@ def _collect_env_vars(channel_type: str) -> dict:
         "image_width": int(os.getenv("IMAGE_WIDTH", "768")),
         "image_height": int(os.getenv("IMAGE_HEIGHT", "768")),
         "image_steps": int(os.getenv("IMAGE_STEPS", "4")),
+        "comfyui": ComfyUIConfig(
+            enabled=os.getenv("COMFYUI_ENABLED", "").lower() in ("1", "true", "yes"),
+            url=os.getenv("COMFYUI_URL"),
+            username=os.getenv("COMFYUI_USERNAME"),
+            password=os.getenv("COMFYUI_PASSWORD"),
+            image_dir=os.getenv("COMFYUI_IMAGE_DIR"),
+            one_image_workflow=os.getenv("COMFYUI_WORKFLOW_ONE_IMAGE"),
+            two_image_workflow=os.getenv("COMFYUI_WORKFLOW_TWO_IMAGE"),
+        ),
         "log_level": os.getenv("LOG_LEVEL", "INFO"),
         "db_path": os.getenv("DB_PATH", "/penny/data/penny/penny.db"),
         "log_file": os.getenv("LOG_FILE"),
@@ -246,6 +255,17 @@ def _build_runtime_params(db: Database | None) -> RuntimeParams:
             with contextlib.suppress(ValueError):
                 env_overrides[key] = param.validator(env_val)
     return RuntimeParams(db=db, env_overrides=env_overrides)
+
+
+@dataclass(frozen=True)
+class ComfyUIConfig:
+    enabled: bool = False
+    url: str | None = None
+    username: str | None = None
+    password: str | None = field(default=None, repr=False)
+    image_dir: str | None = None
+    one_image_workflow: str | None = None
+    two_image_workflow: str | None = None
 
 
 @dataclass
@@ -321,6 +341,7 @@ class Config:
     image_width: int = 768
     image_height: int = 768
     image_steps: int = 4
+    comfyui: ComfyUIConfig = field(default_factory=ComfyUIConfig)
 
     # LLM retry configuration
     llm_max_retries: int = 3

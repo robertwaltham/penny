@@ -2179,8 +2179,8 @@ async def test_generate_image_delivers_the_drawn_image_deterministically(
 ):
     """A drawn image is delivered deterministically to its own reply, by id.
 
-    The model calls generate_image with a faithful description, then replies in
-    text; the tool stores the image in the media table and stamps its id onto the
+    The model repeats generate_image with the same description, then replies in
+    text; one call stores the image in the media table and stamps its id onto the
     tool result, and egress attaches *exactly that row* to the reply — the
     media_ids path takes precedence over the fuzzy nearest-image ladder (which
     still serves replies that didn't generate anything).  A decoy browsed image
@@ -2191,7 +2191,7 @@ async def test_generate_image_delivers_the_drawn_image_deterministically(
     config = make_config()
 
     def handler(request: dict, count: int):
-        if count == 1:
+        if count <= 2:
             return mock_llm._make_tool_call_response(
                 request,
                 "generate_image",

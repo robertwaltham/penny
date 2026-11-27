@@ -2,18 +2,19 @@
 
 A finished cycle's notification is enqueued into ``db.send_queue`` rather than
 dropped when the autonomous-send cooldown hasn't elapsed.  This task is the other
-half: each tick it pops the oldest pending message and delivers it, but only once
+half: each tick it delivers the oldest ready message, but only once
 the flat-interval cooldown has cleared — so no message is lost, just delayed.
 
-It's a plain ``ScheduledTask`` with ONE model-shaped step (#2656): a row with no
-content yet is a composing report — the hand-off a notifying cycle queued, or an
+As a ``ScheduledTask``, it composes rows with no content yet (#2656). Such a
+row is the hand-off a notifying cycle queued, or an
 autonomous job event did (#2975).  For one of those the drainer builds the fact
 set the row's own ``kind`` names — a :class:`JobReport` from the cycle's written
 entries (FULL, never cut), a :class:`SandboxReport` from the previewed trace
 (#2964), or a retirement/failure fact set (#2975) — runs ONE chat-agent turn on
 it, and the message the turn writes is what gets gated, stored on the row and
-delivered.  Every ordinary row (content already set) goes out with no model call
-at all.
+delivered. With scheduled report image editing enabled, the drainer summarizes
+the final text as a prompt to edit its selected attachment. While ComfyUI
+prepares that image, other ready rows and scheduled tasks can proceed.
 
 ``deliver_composed`` (#2913) is the OTHER entry point: a caller that already ran
 its own delivery turn and gated what it wrote (the startup changelog announcement,
@@ -65,7 +66,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
 from penny.constants import CycleTrigger, PennyConstants, QueueItemKind
@@ -85,13 +89,24 @@ from penny.text_validity import half_formed_send_reason
 if TYPE_CHECKING:
     from penny.agents.chat import ChatAgent
     from penny.agents.models import ControllerResponse
-    from penny.channels.base import MessageChannel
+    from penny.channels.base import MessageChannel, PreparedResponseMedia
     from penny.config import Config
     from penny.database import Database
     from penny.database.models import SendQueueItem
     from penny.notification import JobReport
+    from penny.scheduler.scheduled_attachment_editor import ScheduledAttachmentEditor
 
 logger = logging.getLogger(__name__)
+
+
+class _CancelledDeliveryError(Exception):
+    """The queue row was cancelled before the send began."""
+
+
+@dataclass(frozen=True)
+class _ReportImage:
+    media: PreparedResponseMedia
+    task: asyncio.Task[list[str]]
 
 
 class JobRunTracker(Protocol):
@@ -110,7 +125,13 @@ class SendQueueDrainer:
     name = "send_queue_drain"
 
     def __init__(
-        self, db: Database, config: Config, chat_agent: ChatAgent, collector: JobRunTracker
+        self,
+        db: Database,
+        config: Config,
+        chat_agent: ChatAgent,
+        collector: JobRunTracker,
+        *,
+        attachment_editor: ScheduledAttachmentEditor | None = None,
     ) -> None:
         self._db = db
         self._config = config
@@ -121,10 +142,29 @@ class SendQueueDrainer:
         # local model.
         self._collector = collector
         self._channel: MessageChannel | None = None
+        self._attachment_editor = attachment_editor
+        self._image_edits: dict[int, _ReportImage] = {}
+        self._drain_lock = asyncio.Lock()
+        self._closed = False
 
     def set_channel(self, channel: MessageChannel) -> None:
         """Bind the channel the drained messages are delivered through."""
         self._channel = channel
+
+    def interval(self) -> float:
+        """Recheck pending edits on the next scheduler tick."""
+        return 1.0 if self._image_edits else PennyConstants.SEND_QUEUE_DRAIN_INTERVAL
+
+    async def close(self) -> None:
+        self._closed = True
+        await self._discard_image_edits(tuple(self._image_edits))
+
+    async def _discard_image_edits(self, item_ids: tuple[int, ...]) -> None:
+        tasks = [self._image_edits.pop(item_id).task for item_id in item_ids]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def execute(self) -> bool:
         """Deliver one queued message if its lane allows; return whether one went out.
@@ -134,9 +174,24 @@ class SendQueueDrainer:
         wired — the scheduler then moves on to the next schedule this tick.  A
         composing report whose turn produced nothing usable also returns False:
         the row stays pending (or fails out) and a later tick picks the queue up
-        again — but no message behind it goes out until this head resolves,
-        because the queue is FIFO.
+        again. Rows waiting for a ComfyUI result let other ready rows pass.
         """
+        if self._closed or self._drain_lock.locked():
+            return False
+        async with self._drain_lock:
+            return await self._execute()
+
+    async def _execute(self) -> bool:
+        editor = self._attachment_editor
+        if editor is not None and not self._config.runtime.SCHEDULED_REPORT_IMAGE_EDITING:
+            editor = None
+        await self._discard_image_edits(
+            tuple(
+                item_id
+                for item_id in self._image_edits
+                if editor is None or not self._db.send_queue.is_pending(item_id)
+            )
+        )
         if self._collector.is_cycle_running():
             # A job run — a scheduled cycle, a "run this now" dispatch or a sandbox
             # preview — is mid-flight on the local model.  The delivery turn is a
@@ -155,23 +210,71 @@ class SendQueueDrainer:
                 return False
             content, composed_run_id = composed
             if item.id is not None:
-                self._db.send_queue.store_composed(item.id, content)
+                self._db.send_queue.store_composed(item.id, content, run_id=composed_run_id)
         else:
-            # An ordinary row (content already set, no model call here) still
-            # carries whatever run wrote it — ``None`` when there never was one
-            # (a plain ``enqueue``), or an EARLIER tick's own id when that tick
-            # already composed and stored it (a report row whose first delivery
-            # attempt found no recipient: ``item.content`` is no longer empty, so
-            # this branch is taken without re-composing, and ``report_run_id`` is
-            # still the turn that wrote it, not lost to a bare ``None``).
-            content, composed_run_id = item.content, item.report_run_id
-        recipient = await self._deliver(content, collection=item.collection, run_id=composed_run_id)
+            content, composed_run_id = item.content, item.delivery_run_id or item.report_run_id
+        item_id = item.id
+        media = None
+        if (
+            editor is not None
+            and item_id is not None
+            and item.origin == CycleTrigger.CADENCE
+            and item.kind == QueueItemKind.REPORT
+            and item.report_run_id is not None
+        ):
+            if self._resolve_recipient() is None:
+                return False
+            report_image = self._image_edits.get(item_id)
+            if report_image is None:
+                media = await self._channel.prepare_response_media(content)
+                task = await editor.start(
+                    content,
+                    media.attachments or [],
+                    call_link=CallLink.top(item.report_run_id).child(),
+                    item=item,
+                )
+                if task is not None:
+                    self._image_edits[item_id] = _ReportImage(media, task)
+                    if self._closed:
+                        await self._discard_image_edits((item_id,))
+                    return False
+            else:
+                media = report_image.media
+                try:
+                    media = replace(media, attachments=report_image.task.result() or None)
+                except Exception:
+                    logger.exception("Image preparation failed for send queue row %d", item_id)
+        try:
+            recipient = await self._deliver(
+                content,
+                collection=item.collection,
+                run_id=composed_run_id,
+                prepared_media=media,
+                before_send=partial(
+                    self._check_delivery,
+                    item_id,
+                    content,
+                    media is not None or item.image_deadline is not None,
+                ),
+            )
+        except _CancelledDeliveryError:
+            return False
         if recipient is None:
             return False
-        if item.id is not None:
-            self._db.send_queue.mark_sent(item.id)
+        if item_id is not None:
+            self._db.send_queue.mark_sent(item_id)
+            self._image_edits.pop(item_id, None)
         logger.info("send_queue drained: %s → %s", item.collection, recipient)
         return True
+
+    def _check_delivery(self, item_id: int | None, content: str, check_report_gate: bool) -> None:
+        if self._closed or (item_id is not None and not self._db.send_queue.is_pending(item_id)):
+            raise _CancelledDeliveryError
+        if check_report_gate and item_id is not None:
+            reason = withheld_reason(self._db, content)
+            if reason is not None:
+                self._db.send_queue.mark_cancelled(item_id)
+                raise _CancelledDeliveryError
 
     async def deliver_composed(self, content: str, *, collection: str, run_id: str) -> bool:
         """Deliver an already-composed, already-gated message straight through
@@ -188,7 +291,15 @@ class SendQueueDrainer:
         recipient = await self._deliver(content, collection=collection, run_id=run_id)
         return recipient is not None
 
-    async def _deliver(self, content: str, *, collection: str, run_id: str | None) -> str | None:
+    async def _deliver(
+        self,
+        content: str,
+        *,
+        collection: str,
+        run_id: str | None,
+        prepared_media: PreparedResponseMedia | None = None,
+        before_send: Callable[[], None] | None = None,
+    ) -> str | None:
         """Resolve the recipient and send one message through the channel,
         stamped the way every autonomous send is (#1568/#2630).
 
@@ -220,6 +331,8 @@ class SendQueueDrainer:
             # in already composed.  ``None`` only for a row with no real run
             # behind it at all.
             run_id=run_id,
+            prepared_media=prepared_media,
+            before_send=before_send,
         )
         return recipient
 
@@ -381,7 +494,7 @@ class SendQueueDrainer:
         logger.info("Job report for '%s' withheld — %s", item.collection, reason)
 
     def _next_deliverable(self) -> SendQueueItem | None:
-        """The oldest queued message this tick is allowed to deliver.
+        """The oldest ready queued message this tick is allowed to deliver.
 
         The head first, so an empty queue costs one indexed read and nothing else —
         this runs on every idle tick.  With something waiting, the cooldown decides:
@@ -392,8 +505,12 @@ class SendQueueDrainer:
         preview's report (#2964) is asked for the same way ``on_demand`` is — the
         user is sitting in the very conversation that asked for it — tried second
         only because ``on_demand`` already existed first; neither lane's head
-        blocks the other's."""
-        item = self._db.send_queue.next_pending()
+        blocks the other's. In-flight image edits are skipped until their task
+        completes, when the row again competes for its original place in line."""
+        waiting = tuple(
+            item_id for item_id, edit in self._image_edits.items() if not edit.task.done()
+        )
+        item = self._db.send_queue.next_pending(exclude_ids=waiting)
         if item is None or self._cooldown_elapsed():
             return item
         return self._db.send_queue.next_pending(

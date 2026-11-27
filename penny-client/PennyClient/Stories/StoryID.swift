@@ -27,6 +27,8 @@ enum StoryID: String, CaseIterable {
     case shellPromptsExpanded
     case shellPromptsExpandedChat
     case shellSettings
+    case settingsImageEditing
+    case settingsImageEditingUnavailable
     case chatSearch
     case chatSearchEmpty
     case sheetCardDetail

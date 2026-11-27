@@ -95,6 +95,8 @@ struct StoryRootView: View {
                 initialTab: .settings,
                 chatViewModel: StoryFixtures.chatViewModel(messages: StoryFixtures.conversationMessages)
             )
+        case .settingsImageEditing, .settingsImageEditingUnavailable:
+            ImageAttachmentSettingsStory(configured: storyID == .settingsImageEditing)
         case .chatSearch:
             AppShellView(chatViewModel: StoryFixtures.chatSearchViewModel())
         case .chatSearchEmpty:
@@ -112,6 +114,26 @@ struct StoryRootView: View {
         case .uiTestChatScrolling:
             AppShellView(chatViewModel: StoryFixtures.scrollingViewModel())
         }
+    }
+}
+
+private struct ImageAttachmentSettingsStory: View {
+    @State private var viewModel: SettingsViewModel
+
+    init(configured: Bool) {
+        let client = PennyService.storyInstance(messages: [], isConnected: true, imageSettingsConfigured: configured)
+        _viewModel = State(initialValue: SettingsViewModel(client: client, prefs: .shared))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                ImageAttachmentSettingsSection(viewModel: viewModel)
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .task { viewModel.refresh() }
     }
 }
 #endif

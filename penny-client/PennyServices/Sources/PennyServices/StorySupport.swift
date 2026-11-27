@@ -14,16 +14,23 @@ private final class NullWebSocketTransport: WebSocketTransport {
     /// to do and never attempts a real socket, regardless of `Prefs` state.
     let isConnected = true
     var onMessageSent: (() -> Void)?
+    var onConfigMessage: (([String: Any]) -> Void)?
 
     func connect(request: URLRequest, onReceive: @escaping ReceiveHandler, onFailure: @escaping FailureHandler) {}
     func disconnect() {}
     func send(_ data: Data) async throws {
-        guard let onMessageSent,
-              let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              payload["type"] as? String == "message" else { return }
-        // The live run arrives after the chat's initial post-send scroll.
-        try await Task.sleep(for: .milliseconds(700))
-        onMessageSent()
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        switch payload["type"] as? String {
+        case "message":
+            guard let onMessageSent else { return }
+            // The live run arrives after the chat's initial post-send scroll.
+            try await Task.sleep(for: .milliseconds(700))
+            onMessageSent()
+        case "config_request", "config_update":
+            onConfigMessage?(payload)
+        default:
+            break
+        }
     }
 }
 
@@ -63,7 +70,8 @@ public extension PennyService {
         workingElapsedSeconds: Int = 0,
         backgroundRunCount: Int = 0,
         pendingPermissionDomain: String? = nil,
-        workingStepsOnSend: [StoryWorkingStep] = []
+        workingStepsOnSend: [StoryWorkingStep] = [],
+        imageSettingsConfigured: Bool? = nil
     ) -> PennyService {
         let databaseService = DatabaseService()
         databaseService.setupForTesting()
@@ -73,6 +81,25 @@ public extension PennyService {
 
         let transport = NullWebSocketTransport()
         let service = PennyService(databaseService: databaseService, prefs: .shared, webSocketClient: transport)
+        if let imageSettingsConfigured {
+            let settings = ImageAttachmentSetting.allCases.filter { imageSettingsConfigured || !$0.requiresServerConfiguration }
+            var values = Dictionary(uniqueKeysWithValues: settings.map {
+                ($0.rawValue, $0.requiresServerConfiguration ? "0" : "1")
+            })
+            transport.onConfigMessage = { [weak service] message in
+                if let key = message["key"] as? String, let value = message["value"] as? String, values[key] != nil {
+                    values[key] = value
+                }
+                let params = settings.map { setting in
+                    let defaultValue = setting.requiresServerConfiguration ? "0" : "1"
+                    return RuntimeConfigParam(
+                        key: setting.rawValue, value: values[setting.rawValue] ?? defaultValue,
+                        defaultValue: defaultValue, description: "", type: "int", group: "Image Attachments"
+                    )
+                }
+                service?.applyConfigResponse(ConfigResponsePayload(params: params, requestID: message["request_id"] as? String, error: nil))
+            }
+        }
         if !workingStepsOnSend.isEmpty {
             transport.onMessageSent = { [weak service] in
                 let run = makeWorkingRun(from: workingStepsOnSend, elapsedSeconds: 0)

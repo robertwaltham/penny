@@ -6,8 +6,11 @@ public enum ImageAttachmentSetting: String, CaseIterable, Identifiable, Sendable
     case citedPage = "IOS_CITED_PAGE_IMAGES"
     case sameSite = "IOS_SAME_SITE_IMAGES"
     case related = "IOS_RELATED_IMAGES"
+    case scheduledReportEditing = "SCHEDULED_REPORT_IMAGE_EDITING"
 
     public var id: String { rawValue }
+
+    public var requiresServerConfiguration: Bool { self == .scheduledReportEditing }
 }
 
 /// Tracks confirmation separately from the server's authoritative config values.

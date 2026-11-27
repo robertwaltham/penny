@@ -50,6 +50,25 @@ def test_ios_mirroring_backfills_missing_deliveries_and_preserves_existing_acks(
         assert rows == [(1, 5, 1, "2026-05-02"), (2, 5, 0, None)]
 
 
+def test_image_preparation_migration_preserves_a_legacy_reservation():
+    name, path = next(
+        (name, path) for name, path in _discover_migrations() if name.startswith("0149_")
+    )
+    with sqlite3.connect(":memory:") as conn:
+        conn.executescript("""
+            CREATE TABLE send_queue (id INTEGER PRIMARY KEY, image_prompt_id TEXT);
+            INSERT INTO send_queue VALUES (1, 'reserved-id'), (2, NULL);
+            """)
+        migration = _load_module(name, path)
+        migration.up(conn)
+        migration.up(conn)
+        rows = conn.execute(
+            "SELECT image_prompt_id, image_prompt_acknowledged, image_deadline, delivery_run_id "
+            "FROM send_queue ORDER BY id"
+        ).fetchall()
+        assert rows == [("reserved-id", 0, None, None), (None, 0, None, None)]
+
+
 class TestDiscovery:
     """Tests for migration file discovery."""
 
@@ -116,7 +135,7 @@ class TestMigrate:
         conn.close()
 
         count = migrate(db_path)
-        assert count == 146
+        assert count == len(_discover_migrations())
 
         conn = sqlite3.connect(db_path)
         tables = {
@@ -158,7 +177,7 @@ class TestMigrate:
 
         count1 = migrate(db_path)
         count2 = migrate(db_path)
-        assert count1 == 146
+        assert count1 == len(_discover_migrations())
         assert count2 == 0
 
     def test_tracks_in_migrations_table(self, tmp_path):
@@ -196,8 +215,7 @@ class TestMigrate:
         conn.close()
 
         count = migrate(db_path)
-        # 0001 is skipped; the rest run = 145 migrations
-        assert count == 145
+        assert count == len(_discover_migrations()) - 1
 
     def test_bootstrap_with_tables_already_present(self, tmp_path):
         """If tables already exist (from SQLModel.create_tables), migration should succeed."""
@@ -223,7 +241,7 @@ class TestMigrate:
         conn.close()
 
         count = migrate(db_path)
-        assert count == 146  # all migrations applied
+        assert count == len(_discover_migrations())
 
         conn = sqlite3.connect(db_path)
         cursor = conn.execute("SELECT name FROM _migrations")

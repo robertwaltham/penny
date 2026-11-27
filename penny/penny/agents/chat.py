@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from penny.llm.image_client import MfluxImageClient
+    from penny.tools.edit_image import EditImageTool
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,7 @@ class ChatAgent(Agent):
         plugin_tools: list[Tool] | None = None,
         *,
         collector: SandboxRunner,
+        image_edit_tool: EditImageTool | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -212,6 +214,7 @@ class ChatAgent(Agent):
         # Present only when an image model is configured — mirrors the retired
         # /draw command's conditionality; enables the generate_image tool.
         self._image_client = image_client
+        self._image_edit_tool = image_edit_tool
         # Present only when a mailbox is configured (Fastmail or Zoho) — mirrors
         # the retired /email + /zoho commands' conditionality.  Builds the email
         # tools fresh per turn (read_emails summarises against the current
@@ -258,6 +261,8 @@ class ChatAgent(Agent):
             tools.append(
                 GenerateImageTool(self._image_client, self.db, self._embedding_model_client)
             )
+        if self._image_edit_tool is not None:
+            tools.append(self._image_edit_tool)
         tools.extend(self._email_tools())
         tools.extend(self._plugin_tools)
         return tools

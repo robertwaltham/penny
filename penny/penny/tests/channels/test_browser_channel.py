@@ -17,7 +17,7 @@ from penny.channels.base import IncomingMessage
 from penny.channels.browser.channel import BrowserChannel, ConnectionInfo, PendingToolRequest
 from penny.channels.browser.models import BrowserToolResponse, LinkThumbnail
 from penny.channels.turns import TurnRegistry
-from penny.config_params import RUNTIME_CONFIG_PARAMS, RuntimeParams
+from penny.config_params import RUNTIME_CONFIG_PARAMS, SCHEDULED_REPORT_IMAGE_EDITING, RuntimeParams
 from penny.constants import ChannelType, PageReading, PennyConstants, PermissionResolution
 from penny.database import Database
 from penny.database.media_store import normalize_url
@@ -790,7 +790,7 @@ class TestBrowserConfigHandlers:
 
     @pytest.mark.asyncio
     async def test_config_request_returns_all_params(self, tmp_path):
-        """config_request sends a config_response containing every registered param."""
+        """config_request sends the settings supported by the deployment."""
         channel, _ = self._channel(tmp_path)
         ws = _MockWs()
         await channel._handle_config_request(ws)  # ty: ignore[invalid-argument-type]
@@ -799,7 +799,15 @@ class TestBrowserConfigHandlers:
         resp = ws.sent[0]
         assert resp["type"] == "config_response"
         keys = {p["key"] for p in resp["params"]}
-        assert keys == set(RUNTIME_CONFIG_PARAMS.keys())
+        assert keys == set(RUNTIME_CONFIG_PARAMS) - {SCHEDULED_REPORT_IMAGE_EDITING}
+
+        assert channel._config is not None
+        runtime = channel._config.runtime
+        runtime.set_configured(SCHEDULED_REPORT_IMAGE_EDITING, True)
+        await channel._handle_config_request(ws)  # ty: ignore[invalid-argument-type]
+        params = {param["key"]: param for param in ws.sent[-1]["params"]}
+        assert params[SCHEDULED_REPORT_IMAGE_EDITING]["choices"] == ["0", "1"]
+        assert params[SCHEDULED_REPORT_IMAGE_EDITING]["value"] == "0"
 
     @pytest.mark.asyncio
     async def test_config_request_param_shape(self, tmp_path):

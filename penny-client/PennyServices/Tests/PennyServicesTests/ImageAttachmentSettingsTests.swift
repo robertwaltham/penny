@@ -11,6 +11,9 @@ struct ImageAttachmentSettingsTests {
         #expect(!service.supportsImageAttachmentSettings)
         transport.emit(configJSON())
         #expect(service.supportsImageAttachmentSettings)
+        #expect(!service.isImageAttachmentSettingAvailable(.scheduledReportEditing))
+        service.updateImageAttachmentSetting(.scheduledReportEditing, enabled: true)
+        #expect(service.imageAttachmentSettings.pendingSetting == nil)
         transport.payloads = []
         service.updateImageAttachmentSetting(.automatic, enabled: false)
         let identifier = try #require(service.imageAttachmentSettings.requestID)
@@ -97,7 +100,7 @@ private let registeredJSON = """
 """
 
 private func configJSON(requestID: String? = nil, automatic: String = "1", error: String? = nil) -> String {
-    let params = ImageAttachmentSetting.allCases.map { setting in
+    let params = ImageAttachmentSetting.allCases.filter { !$0.requiresServerConfiguration }.map { setting in
         """
         {"key":"\(setting.rawValue)","value":"\(setting == .automatic ? automatic : "1")",
         "default":"1","description":"Image setting","type":"int","group":"iOS Attachments"}

@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import logging
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from penny.config import Config
 from penny.llm import raw_template
 from penny.llm.client import LlmClient
+from penny.llm.comfyui_client import ComfyUIError
 from penny.llm.decision_client import DecisionClient, DecisionError, decision_api_url
 from penny.llm.image_client import MfluxImageClient
 from penny.llm.models import (
@@ -32,6 +34,9 @@ from penny.llm.models import (
     LlmFault,
     RawFaithfulnessOutcome,
 )
+
+if TYPE_CHECKING:
+    from penny.tools.edit_image import EditImageTool
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,7 @@ class PreflightCheck(StrEnum):
     EMBEDDING_MODEL = "embedding-model"
     DECISION_MODEL = "decision-model"
     IMAGE_MODEL = "image-model"
+    COMFYUI = "comfyui"
     BROWSER_ADDON = "browser-addon"
     PRIMARY_CHANNEL = "primary-channel"
     RAW_TEMPLATE_TRANSPORT = "raw-template-transport"
@@ -159,6 +165,8 @@ class Preflight:
         browser_connected: bool,
         configured_channel_type: str,
         resolved_channel_type: str | None,
+        image_edit_tool: EditImageTool | None = None,
+        comfyui_config_error: str | None = None,
     ):
         self.config = config
         self.model_client = model_client
@@ -169,6 +177,8 @@ class Preflight:
         self.browser_connected = browser_connected
         self.configured_channel_type = configured_channel_type
         self.resolved_channel_type = resolved_channel_type
+        self.image_edit_tool = image_edit_tool
+        self.comfyui_config_error = comfyui_config_error
 
     async def run(self) -> PreflightReport:
         """Run every applicable check and collect the results — summary method."""
@@ -178,6 +188,7 @@ class Preflight:
             await self._check_embedding_model(),
             await self._check_decision_model(),
             await self._check_image_model(),
+            await self._check_comfyui(),
             self._check_browser_addon(),
             self._check_primary_channel(),
             self._check_skip_cache_store(),
@@ -386,6 +397,21 @@ class Preflight:
             f"image generation unavailable: {detail} — start the mflux image server "
             f"(see image_server/README.md) or unset LLM_IMAGE_MODEL.",
         )
+
+    async def _check_comfyui(self) -> CheckResult | None:
+        if not self.config.comfyui.enabled:
+            return None
+        if self.image_edit_tool is None:
+            detail = self.comfyui_config_error or "Check the COMFYUI configuration."
+            return self._warn(
+                PreflightCheck.COMFYUI, f"ComfyUI image editing unavailable: {detail}"
+            )
+        try:
+            await self.image_edit_tool.client.health()
+        except ComfyUIError as exc:
+            return self._warn(PreflightCheck.COMFYUI, str(exc))
+        counts = " or ".join(str(count) for count in self.image_edit_tool.client.image_counts)
+        return self._ok(PreflightCheck.COMFYUI, f"ComfyUI available for {counts} input images")
 
     def _check_browser_addon(self) -> CheckResult | None:
         """Browser addon connectivity if the browser channel is enabled (soft warn)."""

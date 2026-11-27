@@ -20,15 +20,20 @@ for it.
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 from sqlmodel import Session, select
 
 from penny.agents.collector import Collector
 from penny.agents.models import ControllerResponse
+from penny.channels.signal.channel import SignalChannel
+from penny.channels.turns import TurnRegistry
+from penny.config_params import SCHEDULED_REPORT_IMAGE_EDITING, RuntimeParams
 from penny.constants import (
     ChannelType,
     CycleTrigger,
@@ -42,9 +47,13 @@ from penny.database.models import SendQueueItem
 from penny.database.mutation_store import MutationDetail, render_mutation
 from penny.llm.call_link import CallLink
 from penny.llm.client import LlmClient
-from penny.llm.models import LlmMessage, LlmResponse
+from penny.llm.comfyui_client import ComfyUIError
+from penny.llm.models import LlmError, LlmMessage, LlmResponse
+from penny.scheduler.base import BackgroundScheduler
+from penny.scheduler.scheduled_attachment_editor import ScheduledAttachmentEditor
+from penny.scheduler.schedules import PeriodicSchedule
 from penny.scheduler.send_queue_drainer import SendQueueDrainer
-from penny.tests.conftest import require_memory, wait_until
+from penny.tests.conftest import ONE_PX_PNG_B64, require_memory, wait_until
 from penny.tests.schema_template import schema_only_db
 
 _PENNY_LOG = PennyConstants.MEMORY_PENNY_MESSAGES_LOG
@@ -81,8 +90,8 @@ def _make_db(tmp_path) -> Database:
     return db
 
 
-def _make_config(cooldown_seconds: float = 600.0):
-    runtime = type("Runtime", (), {"SEND_COOLDOWN_SECONDS": cooldown_seconds})()
+def _make_config(cooldown_seconds: float = 600.0, *, db: Database | None = None):
+    runtime = RuntimeParams(db=db, env_overrides={"SEND_COOLDOWN_SECONDS": cooldown_seconds})
     return type("Config", (), {"runtime": runtime})()
 
 
@@ -548,7 +557,11 @@ def _make_real_collector(db: Database, test_config, model_client) -> Collector:
     )
 
 
-def _seed_report_row(db: Database, run_id: str) -> None:
+def _seed_report_row(
+    db: Database,
+    run_id: str,
+    origin: CycleTrigger = CycleTrigger.ON_DEMAND,
+) -> None:
     """A buildable composing report row: the collection plus the entry its run
     wrote, so once the gate opens the compose path can actually assemble the
     fact set instead of failing the row."""
@@ -568,9 +581,331 @@ def _seed_report_row(db: Database, run_id: str) -> None:
         author="producer",
         run_id=run_id,
     )
-    db.send_queue.enqueue_report(
-        _REPORT_COLLECTION, CycleTrigger.ON_DEMAND, run_id, kind=QueueItemKind.REPORT
+    db.send_queue.enqueue_report(_REPORT_COLLECTION, origin, run_id, kind=QueueItemKind.REPORT)
+
+
+@pytest.mark.parametrize(
+    ("origin", "configured", "enabled", "has_image", "failure"),
+    [
+        (CycleTrigger.CADENCE, True, True, True, None),
+        (CycleTrigger.CADENCE, True, True, True, "summary"),
+        (CycleTrigger.CADENCE, True, True, True, "edit"),
+        (CycleTrigger.CADENCE, True, True, False, None),
+        (CycleTrigger.CADENCE, True, False, True, None),
+        (CycleTrigger.CADENCE, False, True, True, None),
+        (CycleTrigger.ON_DEMAND, True, True, True, None),
+    ],
+)
+async def test_report_attachment_uses_the_final_report_as_a_comfyui_prompt_source(
+    tmp_path, monkeypatch, origin, configured, enabled, has_image, failure
+):
+    db = _make_db(tmp_path)
+    _seed_report_row(db, "scheduled-run", origin)
+    config = _make_config(db=db)
+    config.runtime.set_configured(SCHEDULED_REPORT_IMAGE_EDITING, configured)
+    if enabled:
+        db.config.set(SCHEDULED_REPORT_IMAGE_EDITING, "1", "Edit scheduled report attachments")
+    source_url = "https://example.com/astral"
+    final_report = f"Astral Drift arrives in spring. See {source_url}"
+    original = base64.b64decode(ONE_PX_PNG_B64)
+    if has_image:
+        db.media.put(data=original, mime_type="image/png", source_url=source_url)
+
+    chat = MagicMock()
+    chat.handle_job_report = AsyncMock(return_value=ControllerResponse(answer=final_report))
+    model = AsyncMock()
+    prompt = "An astronaut drifts past a planet in bloom."
+    model.chat.return_value = LlmResponse(message=LlmMessage(role="assistant", content=prompt))
+    comfyui = AsyncMock()
+
+    def submit_edit(description, images, *, reserve_prompt, acknowledge_prompt):
+        prompt_id = reserve_prompt()
+        assert prompt_id is not None
+        acknowledge_prompt(prompt_id, prompt_id)
+        return prompt_id
+
+    comfyui.submit_edit.side_effect = submit_edit
+    comfyui.fetch_edit.return_value = b"mocked edited PNG"
+    if failure == "summary":
+        model.chat.side_effect = LlmError("model unavailable")
+    elif failure == "edit":
+        comfyui.fetch_edit.side_effect = ComfyUIError("image generation unavailable")
+
+    channel = SignalChannel(
+        "http://signal.test", _PENNY_NUMBER, chat, db, turn_registry=TurnRegistry()
     )
+    send_raw = AsyncMock(return_value=42)
+    monkeypatch.setattr(channel, "_send_raw", send_raw)
+    drainer = SendQueueDrainer(
+        db,
+        config,
+        chat,
+        _IdleCollector(),
+        attachment_editor=ScheduledAttachmentEditor(model, comfyui, db.send_queue, timeout=5)
+        if configured
+        else None,
+    )
+    drainer.set_channel(channel)
+    try:
+        if not await drainer.execute():
+            await wait_until(
+                lambda: all(pending.task.done() for pending in drainer._image_edits.values())
+            )
+            assert await drainer.execute()
+    finally:
+        await drainer.close()
+        await channel.close()
+
+    should_summarize = configured and enabled and has_image and origin == CycleTrigger.CADENCE
+    if should_summarize:
+        assert model.chat.await_count == 1
+        request = model.chat.await_args.kwargs
+        assert request["messages"][-1].content == final_report
+        assert request["call_link"].parent_run_id == "scheduled-run"
+    else:
+        model.chat.assert_not_awaited()
+    if should_summarize and failure != "summary":
+        comfyui.submit_edit.assert_awaited_once()
+        assert comfyui.submit_edit.await_args.args == (prompt, [(original, "image/png")])
+        comfyui.fetch_edit.assert_awaited_once()
+    else:
+        comfyui.submit_edit.assert_not_awaited()
+        comfyui.fetch_edit.assert_not_awaited()
+
+    expected = None
+    if has_image:
+        image = (
+            comfyui.fetch_edit.return_value if should_summarize and failure is None else original
+        )
+        expected = [f"data:image/png;base64,{base64.b64encode(image).decode()}"]
+    assert send_raw.await_args is not None
+    assert send_raw.await_args.args[1:3] == (final_report, expected)
+    stored = db.messages.find_outgoing_by_content(final_report)
+    assert stored is not None and stored.id is not None
+    report_call = chat.handle_job_report.await_args
+    assert report_call is not None and stored.run_id == report_call.kwargs["call_link"].run_id
+    assert db.messages.attachments_for_message_ids([stored.id]).get(stored.id) == expected
+    assert db.send_queue.next_pending() is None
+
+
+@pytest.fixture
+async def scheduled_edit(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    _seed_report_row(db, "scheduled-run", CycleTrigger.CADENCE)
+    config = _make_config(cooldown_seconds=0, db=db)
+    config.runtime.set_configured(SCHEDULED_REPORT_IMAGE_EDITING, True)
+    db.config.set(SCHEDULED_REPORT_IMAGE_EDITING, "1", "Edit scheduled report attachments")
+    source_url = "https://example.com/astral"
+    report = f"Astral Drift arrives in spring. See {source_url}"
+    db.media.put(
+        data=base64.b64decode(ONE_PX_PNG_B64), mime_type="image/png", source_url=source_url
+    )
+    chat = MagicMock()
+    chat.handle_job_report = AsyncMock(return_value=ControllerResponse(answer=report))
+    model = AsyncMock()
+    model.chat.return_value = LlmResponse(
+        message=LlmMessage(role="assistant", content="An astronaut near a planet.")
+    )
+    comfyui = AsyncMock()
+    comfyui.fetch_edit.return_value = b"mocked edited PNG"
+    send_raw = AsyncMock(return_value=42)
+    channel = SignalChannel(
+        "http://signal.test", _PENNY_NUMBER, chat, db, turn_registry=TurnRegistry()
+    )
+    monkeypatch.setattr(channel, "_send_raw", send_raw)
+    drainers = []
+
+    def make_drainer(*, timeout=5):
+        drainer = SendQueueDrainer(
+            db,
+            config,
+            chat,
+            _IdleCollector(),
+            attachment_editor=ScheduledAttachmentEditor(
+                model, comfyui, db.send_queue, timeout=timeout
+            ),
+        )
+        drainer.set_channel(channel)
+        drainers.append(drainer)
+        return drainer
+
+    try:
+        yield SimpleNamespace(
+            db=db,
+            chat=chat,
+            model=model,
+            comfyui=comfyui,
+            send_raw=send_raw,
+            make_drainer=make_drainer,
+            report=report,
+        )
+    finally:
+        for drainer in drainers:
+            await drainer.close()
+        await channel.close()
+
+
+@pytest.mark.parametrize(
+    "interrupted_state", ["before_acceptance", "lost_response", "acknowledged"]
+)
+async def test_restart_reconciles_scheduled_image_submission(scheduled_edit, interrupted_state):
+    edit = scheduled_edit
+    interrupted = asyncio.Event()
+    server_prompt_id = str(uuid4())
+
+    async def submit_edit(description, images, *, reserve_prompt, acknowledge_prompt):
+        requested_id = reserve_prompt()
+        assert requested_id is not None
+        pending = edit.db.send_queue.next_pending()
+        assert pending is not None and pending.image_prompt_id == requested_id
+        assert not pending.image_prompt_acknowledged
+        if edit.comfyui.submit_edit.await_count == 1:
+            if interrupted_state == "lost_response":
+                edit.comfyui.recover_submission.side_effect = lambda reserved_id: (
+                    server_prompt_id if reserved_id == requested_id else None
+                )
+            if interrupted_state != "acknowledged":
+                interrupted.set()
+                await asyncio.Future()
+        # Some servers return a replacement for the requested ID.
+        acknowledge_prompt(requested_id, server_prompt_id)
+        return server_prompt_id
+
+    async def fetch_edit(prompt_id, *, image_count):
+        assert image_count == 1
+        if interrupted_state == "acknowledged" and edit.comfyui.fetch_edit.await_count == 1:
+            interrupted.set()
+            await asyncio.Future()
+        return b"mocked edited PNG"
+
+    edit.comfyui.submit_edit.side_effect = submit_edit
+    edit.comfyui.fetch_edit.side_effect = fetch_edit
+    edit.comfyui.recover_submission.return_value = None
+    initial = edit.make_drainer()
+
+    assert not await initial.execute()
+    await asyncio.wait_for(interrupted.wait(), timeout=3)
+    await initial.close()
+
+    pending = edit.db.send_queue.next_pending()
+    assert pending is not None and pending.image_prompt_id is not None
+    assert pending.image_prompt_acknowledged == (interrupted_state == "acknowledged")
+    if pending.image_prompt_acknowledged:
+        assert pending.image_prompt_id == server_prompt_id
+    resumed = edit.make_drainer(timeout=60)
+    assert not await resumed.execute()
+    await wait_until(lambda: resumed._image_edits[pending.id].task.done(), timeout=3)
+    current = edit.db.send_queue.next_pending()
+    assert current is not None and current.image_prompt_acknowledged
+    assert current.image_deadline == pending.image_deadline
+    assert await resumed.execute()
+
+    edit.chat.handle_job_report.assert_awaited_once()
+    assert edit.comfyui.submit_edit.await_count == (
+        2 if interrupted_state == "before_acceptance" else 1
+    )
+    assert edit.comfyui.fetch_edit.await_args.args == (server_prompt_id,)
+    edit.send_raw.assert_awaited_once()
+    assert edit.send_raw.await_args.args[2] == [
+        f"data:image/png;base64,{base64.b64encode(b'mocked edited PNG').decode()}"
+    ]
+
+
+async def test_scheduled_wait_leaves_scheduler_free_and_archive_prevents_delivery(scheduled_edit):
+    edit = scheduled_edit
+    fetching = asyncio.Event()
+    next_task_ran = asyncio.Event()
+    release_result = asyncio.Event()
+
+    def submit_edit(description, images, *, reserve_prompt, acknowledge_prompt):
+        prompt_id = reserve_prompt()
+        acknowledge_prompt(prompt_id, prompt_id)
+        return prompt_id
+
+    async def fetch_edit(prompt_id, *, image_count):
+        fetching.set()
+        await release_result.wait()
+        return b"mocked edited PNG"
+
+    class OtherTask:
+        name = "other_task"
+
+        async def execute(self) -> bool:
+            await fetching.wait()
+            next_task_ran.set()
+            return False
+
+    edit.comfyui.submit_edit.side_effect = submit_edit
+    edit.comfyui.fetch_edit.side_effect = fetch_edit
+    drainer = edit.make_drainer()
+    scheduler = BackgroundScheduler(
+        [
+            PeriodicSchedule(drainer, lambda: 0.01, lambda: 0),
+            PeriodicSchedule(OtherTask(), lambda: 0.01, lambda: 0),
+        ],
+        tick_interval=0.01,
+    )
+    row = edit.db.send_queue.next_pending()
+    task = asyncio.create_task(scheduler.run())
+    try:
+        await asyncio.wait_for(next_task_ran.wait(), timeout=1)
+        edit.db.send_queue.enqueue("The second report is ready.", "other")
+        await wait_until(lambda: edit.send_raw.await_count == 1, timeout=1)
+        assert edit.send_raw.await_args.args[1] == "The second report is ready."
+        assert fetching.is_set() and not release_result.is_set()
+
+        scheduler.notify_foreground_start()
+        edit.db.memories.archive(_REPORT_COLLECTION)
+        release_result.set()
+        await wait_until(lambda: drainer._image_edits[row.id].task.done(), timeout=1)
+        edit.send_raw.assert_awaited_once()
+        scheduler.notify_foreground_end()
+        await wait_until(lambda: not drainer._image_edits, timeout=1)
+    finally:
+        release_result.set()
+        scheduler.stop()
+        await asyncio.wait_for(task, timeout=2)
+    edit.send_raw.assert_awaited_once()
+    assert edit.db.messages.find_outgoing_by_content(edit.report) is None
+    with Session(edit.db.engine) as session:
+        cancelled = session.get(SendQueueItem, row.id)
+        assert cancelled is not None and cancelled.cancelled_at and cancelled.sent_at is None
+
+
+async def test_expired_scheduled_edit_falls_back_after_restart(scheduled_edit):
+    edit = scheduled_edit
+    row = edit.db.send_queue.next_pending()
+    deadline = datetime.now(UTC).timestamp() - 1
+    edit.db.send_queue.start_image_preparation(row.id, deadline)
+    assert await edit.make_drainer().execute()
+    edit.comfyui.fetch_edit.assert_not_awaited()
+    edit.comfyui.submit_edit.assert_not_awaited()
+    assert edit.send_raw.await_args.args[2] == [f"data:image/png;base64,{ONE_PX_PNG_B64}"]
+
+
+async def test_turning_off_scheduled_edit_sends_original_while_edit_is_pending(scheduled_edit):
+    edit = scheduled_edit
+    fetching = asyncio.Event()
+
+    def submit_edit(description, images, *, reserve_prompt, acknowledge_prompt):
+        prompt_id = reserve_prompt()
+        acknowledge_prompt(prompt_id, prompt_id)
+        return prompt_id
+
+    async def fetch_edit(prompt_id, *, image_count):
+        fetching.set()
+        await asyncio.Future()
+
+    edit.comfyui.submit_edit.side_effect = submit_edit
+    edit.comfyui.fetch_edit.side_effect = fetch_edit
+    drainer = edit.make_drainer()
+    assert not await drainer.execute()
+    await asyncio.wait_for(fetching.wait(), timeout=1)
+    edit.db.config.set(SCHEDULED_REPORT_IMAGE_EDITING, "0", "Edit scheduled report attachments")
+    assert await drainer.execute()
+    assert not drainer._image_edits
+    edit.send_raw.assert_awaited_once()
+    assert edit.send_raw.await_args.args[2] == [f"data:image/png;base64,{ONE_PX_PNG_B64}"]
 
 
 @pytest.mark.asyncio

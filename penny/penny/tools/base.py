@@ -143,6 +143,9 @@ class Tool(ABC):
     # rejected through the envelope instead of being silently dropped.
     args_model: type[ToolArgs] = NoArgs
     timeout: float | None = None  # None = use ToolExecutor's global timeout
+    # Identical successful calls can reuse their result for the rest of the turn,
+    # even when a mutation invalidates the ordinary duplicate-call cache.
+    deduplicate_successful_calls: bool = False
     # The tools THIS tool's own rendered text may direct the model to (#1911).  A
     # result message that says "call ``collection_write(key=…)``" is an ANCHOR: the n≤1
     # discipline says a rendered instruction resolves in one call, so it must never

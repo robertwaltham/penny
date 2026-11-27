@@ -22,7 +22,9 @@ without content.
 from __future__ import annotations
 
 import logging
+from uuid import uuid4
 
+from sqlalchemy import func, update
 from sqlmodel import Session, col, select
 
 from penny.clock import Clock
@@ -111,16 +113,82 @@ class SendQueueStore:
             )
             return row.id
 
-    def store_composed(self, item_id: int, content: str) -> None:
+    def store_composed(self, item_id: int, content: str, *, run_id: str | None = None) -> None:
         """Store the message the delivery chat turn wrote for this report row."""
         with self._session() as session:
             row = session.get(SendQueueItem, item_id)
             if row is None:
                 return
             row.content = content
+            row.delivery_run_id = run_id
             session.add(row)
             session.commit()
             logger.info("Report %d composed (%d chars)", item_id, len(content))
+
+    def start_image_preparation(self, item_id: int, deadline: float) -> float | None:
+        """Start the wait budget once and return the existing deadline on retry."""
+        with self._session() as session:
+            current_deadline = session.scalars(
+                update(SendQueueItem)
+                .where(col(SendQueueItem.id) == item_id, *self._pending_conditions())
+                .values(image_deadline=func.coalesce(col(SendQueueItem.image_deadline), deadline))
+                .returning(col(SendQueueItem.image_deadline))
+            ).one_or_none()
+            session.commit()
+            return current_deadline
+
+    def reserve_image_prompt(
+        self, item_id: int, *, previous_prompt_id: str | None = None
+    ) -> str | None:
+        """Give one delivery attempt permission to submit an image for this row."""
+        prompt_id = str(uuid4())
+        with self._session() as session:
+            reserved = session.scalars(
+                update(SendQueueItem)
+                .where(
+                    col(SendQueueItem.id) == item_id,
+                    col(SendQueueItem.image_prompt_id) == previous_prompt_id,
+                    col(SendQueueItem.image_prompt_acknowledged).is_(False),
+                    *self._pending_conditions(),
+                )
+                .values(image_prompt_id=prompt_id)
+                .returning(col(SendQueueItem.image_prompt_id))
+            ).one_or_none()
+            session.commit()
+            return reserved
+
+    def acknowledge_image_prompt(self, item_id: int, reserved_id: str, prompt_id: str) -> None:
+        """Record acceptance under the server's actual ID."""
+        with self._session() as session:
+            session.exec(
+                update(SendQueueItem)
+                .where(
+                    col(SendQueueItem.id) == item_id,
+                    col(SendQueueItem.image_prompt_id) == reserved_id,
+                    *self._pending_conditions(),
+                )
+                .values(image_prompt_id=prompt_id, image_prompt_acknowledged=True)
+            )
+            session.commit()
+
+    @staticmethod
+    def _pending_conditions():
+        return (
+            col(SendQueueItem.sent_at).is_(None),
+            col(SendQueueItem.cancelled_at).is_(None),
+            col(SendQueueItem.failed_at).is_(None),
+        )
+
+    def is_pending(self, item_id: int) -> bool:
+        with self._session() as session:
+            return (
+                session.exec(
+                    select(SendQueueItem.id).where(
+                        col(SendQueueItem.id) == item_id, *self._pending_conditions()
+                    )
+                ).first()
+                is not None
+            )
 
     def bump_compose_attempts(self, item_id: int) -> int:
         """Count one failed compose; return the row's new attempt count."""
@@ -148,7 +216,9 @@ class SendQueueStore:
             session.commit()
             logger.error("Report %d failed to compose within its retry budget", item_id)
 
-    def next_pending(self, origin: CycleTrigger | None = None) -> SendQueueItem | None:
+    def next_pending(
+        self, origin: CycleTrigger | None = None, *, exclude_ids: tuple[int, ...] = ()
+    ) -> SendQueueItem | None:
         """The oldest message still awaiting delivery, or None if the queue is empty.
 
         A cancelled row (``cancelled_at`` stamped) and a failed one
@@ -163,13 +233,11 @@ class SendQueueStore:
         exactly the case this exists for — a user waiting on their own run while an
         older cadence message sits out the cooldown.  ``None`` = every lane."""
         with self._session() as session:
-            query = select(SendQueueItem).where(
-                col(SendQueueItem.sent_at).is_(None),
-                col(SendQueueItem.cancelled_at).is_(None),
-                col(SendQueueItem.failed_at).is_(None),
-            )
+            query = select(SendQueueItem).where(*self._pending_conditions())
             if origin is not None:
                 query = query.where(SendQueueItem.origin == origin)
+            if exclude_ids:
+                query = query.where(col(SendQueueItem.id).not_in(exclude_ids))
             return session.exec(
                 query.order_by(col(SendQueueItem.created_at).asc()).limit(1)
             ).first()
@@ -186,11 +254,7 @@ class SendQueueStore:
             return list(
                 session.exec(
                     select(SendQueueItem)
-                    .where(
-                        col(SendQueueItem.sent_at).is_(None),
-                        col(SendQueueItem.cancelled_at).is_(None),
-                        col(SendQueueItem.failed_at).is_(None),
-                    )
+                    .where(*self._pending_conditions())
                     .order_by(col(SendQueueItem.created_at).asc())
                 )
             )
@@ -211,9 +275,7 @@ class SendQueueStore:
                 session.exec(
                     select(SendQueueItem).where(
                         SendQueueItem.collection == collection,
-                        col(SendQueueItem.sent_at).is_(None),
-                        col(SendQueueItem.cancelled_at).is_(None),
-                        col(SendQueueItem.failed_at).is_(None),
+                        *self._pending_conditions(),
                     )
                 )
             )
@@ -245,7 +307,7 @@ class SendQueueStore:
         """Stamp a row delivered so the drain never re-sends it."""
         with self._session() as session:
             row = session.get(SendQueueItem, item_id)
-            if row is None:
+            if row is None or row.cancelled_at is not None or row.failed_at is not None:
                 return
             row.sent_at = self._clock.now()
             session.add(row)

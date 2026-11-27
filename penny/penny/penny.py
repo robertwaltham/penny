@@ -25,6 +25,7 @@ from penny.channels.permission_manager import PermissionManager
 from penny.channels.signal.channel import SignalChannel
 from penny.commands import create_command_registry
 from penny.config import Config, setup_logging
+from penny.config_params import SCHEDULED_REPORT_IMAGE_EDITING
 from penny.constants import ChannelType, PennyConstants
 from penny.database import Database
 from penny.database.migrate import migrate
@@ -32,6 +33,7 @@ from penny.database.models import MemoryEntry, MessageLog
 from penny.email.protocol import EmailClient
 from penny.llm.call_link import CallLink
 from penny.llm.client import LlmClient
+from penny.llm.comfyui_client import ComfyUIError
 from penny.llm.decision_client import DecisionClient, decision_api_url
 from penny.llm.embeddings import serialize_embedding
 from penny.llm.image_client import MfluxImageClient
@@ -50,10 +52,12 @@ from penny.scheduler import (
     PeriodicSchedule,
     Schedule,
 )
+from penny.scheduler.scheduled_attachment_editor import ScheduledAttachmentEditor
 from penny.scheduler.send_queue_drainer import SendQueueDrainer
 from penny.text_validity import half_formed_send_reason
 from penny.tools import Tool
 from penny.tools.draft_email import DraftEmailTool
+from penny.tools.edit_image import EditImageTool
 from penny.tools.list_emails import ListEmailsTool
 from penny.tools.list_folders import ListFoldersTool
 from penny.tools.read_emails import ReadEmailsTool
@@ -172,6 +176,13 @@ class Penny:
             if config.llm_image_model
             else None
         )
+        self.image_edit_tool: EditImageTool | None = None
+        self.comfyui_config_error: str | None = None
+        if config.comfyui.enabled:
+            try:
+                self.image_edit_tool = EditImageTool(config.comfyui, timeout=config.tool_timeout)
+            except ComfyUIError as exc:
+                self.comfyui_config_error = str(exc)
         # The entry-identity ladder's decision model (#2715).  Optional: unset
         # runs the named degraded mode ("entry matching falls back to asking"),
         # reported by the preflight — never a silent no-op.
@@ -270,6 +281,17 @@ class Penny:
         picks the most-overdue collection with an extraction_prompt, and
         runs the agent loop bound to that target.
         """
+        attachment_editor = (
+            ScheduledAttachmentEditor(
+                self.model_client,
+                self.image_edit_tool.client,
+                self.db.send_queue,
+                timeout=config.tool_timeout,
+            )
+            if self.image_edit_tool is not None and 1 in self.image_edit_tool.client.image_counts
+            else None
+        )
+        config.runtime.set_configured(SCHEDULED_REPORT_IMAGE_EDITING, attachment_editor is not None)
         # Collector built FIRST (#2964): ChatAgent needs it wired in at
         # construction (its ``collector`` param is required, no late ``set_``,
         # per CLAUDE.md "Pass parameters, don't swap state") for the
@@ -287,14 +309,14 @@ class Penny:
             config=config,
             embedding_model_client=self.embedding_model_client,
             image_client=self.image_client,
+            image_edit_tool=self.image_edit_tool,
             email_tools_builder=self.email_tools_builder,
             plugin_tools=self.plugin_tools,
             collector=self.collector,
         )
         # Delivers queued autonomous messages once the autonomous-send cooldown
-        # clears.  Mostly deterministic — its one model-shaped step (#2656) is
-        # composing a notifying cycle's report, which it rides through the chat
-        # agent before delivering.
+        # clears. It composes notifying cycles' reports through the chat agent
+        # and optionally edits the scheduled report's image before delivery.
         self.send_queue_drainer = SendQueueDrainer(
             db=self.db,
             config=config,
@@ -304,6 +326,7 @@ class Penny:
             # structural read covering scheduled cycles, "run it now" dispatches
             # and sandbox previews.
             collector=self.collector,
+            attachment_editor=attachment_editor,
         )
 
     def _init_commands(self, config: Config) -> None:
@@ -420,7 +443,7 @@ class Penny:
             # collection cycle.
             PeriodicSchedule(
                 agent=self.send_queue_drainer,
-                interval=lambda: PennyConstants.SEND_QUEUE_DRAIN_INTERVAL,
+                interval=self.send_queue_drainer.interval,
                 idle_threshold=lambda: config.runtime.IDLE_SECONDS,
             ),
             PeriodicSchedule(
@@ -498,6 +521,8 @@ class Penny:
             embedding_client=self.embedding_model_client,
             decision_client=self.decision_client,
             image_client=self.image_client,
+            image_edit_tool=self.image_edit_tool,
+            comfyui_config_error=self.comfyui_config_error,
             browser_enabled=self.config.browser_enabled,
             browser_connected=bool(browser and browser.has_browser_connection),
             configured_channel_type=self.config.channel_type,
@@ -891,6 +916,7 @@ class Penny:
         """Clean shutdown of resources."""
         logger.info("Shutting down agent...")
         self.scheduler.stop()
+        await self.send_queue_drainer.close()
         await self.channel.close()
         await Agent.close_all()
         await self.model_client.close()

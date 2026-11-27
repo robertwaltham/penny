@@ -1471,13 +1471,13 @@ async def test_sent_message_embedding_and_run_reach_pull_and_history_wire_record
 
 @pytest.mark.asyncio
 async def test_image_settings_are_validated_shared_and_persisted(db, test_config):
-    from penny.config_params import GROUP_IOS_ATTACHMENTS, RuntimeParams
+    from penny.config_params import GROUP_IMAGE_ATTACHMENTS, RuntimeParams
 
     channel = _make_channel(db)
     test_config.runtime = RuntimeParams(db=db)
     channel._config = test_config
     response = await _ios_admin_request(channel, {"type": "config_request"})
-    settings = [param for param in response["params"] if param["group"] == GROUP_IOS_ATTACHMENTS]
+    settings = [param for param in response["params"] if param["group"] == GROUP_IMAGE_ATTACHMENTS]
     assert len(settings) == 4
     assert all(param["value"] == param["default"] == "1" for param in settings)
     for param in settings:
@@ -1503,8 +1503,43 @@ async def test_image_settings_are_validated_shared_and_persisted(db, test_config
     assert all(
         param["value"] == "0"
         for param in response["params"]
-        if param["group"] == GROUP_IOS_ATTACHMENTS
+        if param["group"] == GROUP_IMAGE_ATTACHMENTS
     )
+
+
+@pytest.mark.asyncio
+async def test_scheduled_report_image_setting_is_available_only_when_configured(db, test_config):
+    from penny.config_params import SCHEDULED_REPORT_IMAGE_EDITING, RuntimeParams
+
+    channel = _make_channel(db)
+    runtime = RuntimeParams(db=db)
+    test_config.runtime = runtime
+    channel._config = test_config
+    request = {
+        "type": "config_update",
+        "key": SCHEDULED_REPORT_IMAGE_EDITING,
+        "value": "1",
+        "request_id": "scheduled-edit",
+    }
+    rejected = await _ios_admin_request(channel, request)
+    assert rejected["request_id"] == "scheduled-edit"
+    assert "error" in rejected
+    assert all(param["key"] != SCHEDULED_REPORT_IMAGE_EDITING for param in rejected["params"])
+    assert db.config.get(SCHEDULED_REPORT_IMAGE_EDITING) is None
+
+    runtime.set_configured(SCHEDULED_REPORT_IMAGE_EDITING, True)
+    response = await _ios_admin_request(channel, {"type": "config_request"})
+    setting = next(
+        param for param in response["params"] if param["key"] == SCHEDULED_REPORT_IMAGE_EDITING
+    )
+    assert setting["value"] == setting["default"] == "0"
+    saved = await _ios_admin_request(channel, request)
+    assert "error" not in saved
+    assert runtime.SCHEDULED_REPORT_IMAGE_EDITING == 1
+
+    runtime.set_configured(SCHEDULED_REPORT_IMAGE_EDITING, False)
+    assert runtime.SCHEDULED_REPORT_IMAGE_EDITING == 0
+    await channel.close()
 
 
 @pytest.mark.asyncio

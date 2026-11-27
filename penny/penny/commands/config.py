@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from penny.commands.base import Command
 from penny.commands.models import CommandContext, CommandResult
-from penny.config_params import RUNTIME_CONFIG_PARAMS, get_params_by_group
+from penny.config_params import get_params_by_group, get_runtime_param
 from penny.responses import PennyResponse
 
 
@@ -25,15 +25,16 @@ class ConfigCommand(Command):
     async def execute(self, args: str, context: CommandContext) -> CommandResult:
         """Execute config command."""
         parts = args.strip().split(maxsplit=1)
+        runtime = context.config.runtime
 
         # Case 1: List all config
         if not args.strip():
             lines = [PennyResponse.CONFIG_HEADER, ""]
 
-            for group_name, params in get_params_by_group():
+            for group_name, params in get_params_by_group(runtime):
                 lines.append(PennyResponse.CONFIG_GROUP_HEADER.format(group=group_name))
                 for param in params:
-                    current_value = getattr(context.config.runtime, param.key)
+                    current_value = getattr(runtime, param.key)
                     lines.append(
                         PennyResponse.CONFIG_PARAM_DISPLAY.format(
                             key=param.key,
@@ -46,24 +47,18 @@ class ConfigCommand(Command):
             lines.append(PennyResponse.CONFIG_FOOTER)
             return CommandResult(text="\n".join(lines))
 
+        key = parts[0].upper()
+        param = get_runtime_param(key, runtime)
+        if param is None:
+            return CommandResult(text=PennyResponse.CONFIG_UNKNOWN_PARAM.format(key=key))
+
         # Case 2: Get specific config
         if len(parts) == 1:
-            key = parts[0].upper()
-            if key not in RUNTIME_CONFIG_PARAMS:
-                return CommandResult(text=PennyResponse.CONFIG_UNKNOWN_PARAM.format(key=key))
-
-            param = RUNTIME_CONFIG_PARAMS[key]
-            current_value = getattr(context.config.runtime, key)
+            current_value = getattr(runtime, key)
             return CommandResult(text=f"**{key}**: {current_value} ({param.description})")
 
         # Case 3: Set config value
-        key = parts[0].upper()
         value_str = parts[1]
-
-        if key not in RUNTIME_CONFIG_PARAMS:
-            return CommandResult(text=PennyResponse.CONFIG_UNKNOWN_PARAM.format(key=key))
-
-        param = RUNTIME_CONFIG_PARAMS[key]
 
         # Validate value
         try:

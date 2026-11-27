@@ -9,6 +9,7 @@ import re
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -38,6 +39,12 @@ if TYPE_CHECKING:
     from penny.scheduler import BackgroundScheduler
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PreparedResponseMedia:
+    embedding: list[float] | None
+    attachments: list[str] | None
 
 
 def strip_image_tokens(text: str) -> str:
@@ -487,6 +494,9 @@ class MessageChannel(ABC):
         media_ids: list[int] | None = None,
         mechanism: str | None = None,
         run_id: str | None = None,
+        *,
+        prepared_media: PreparedResponseMedia | None = None,
+        before_send: Callable[[], None] | None = None,
     ) -> int | None:
         """
         Log and deliver a conversational reply with embedding + side-channel media.
@@ -504,6 +514,8 @@ class MessageChannel(ABC):
             media_ids: Media rows this run generated (``generate_image``) that must
                 be attached deterministically to *this* reply — the exact rows,
                 not an embedding-nearest guess.
+            prepared_media: Previously selected attachments and their text embedding.
+            before_send: Optional caller check immediately before logging and delivery.
             mechanism: The bound collection whose autonomous cycle produced this
                 send (#1568) — stamped on the delivered ``messagelog`` row so it
                 names its cause.  ``None`` for a direct reply (a chat turn with a
@@ -519,26 +531,36 @@ class MessageChannel(ABC):
             Database message ID if send was successful, None otherwise
         """
         prepared = self.prepare_outgoing(content)
-        # Embed once: stored on the messagelog row (the penny-messages facade's
-        # read_similar ranks on it) and reused for nearest-image matching. The
-        # embedding is of the model's own text — the content stored on the row —
-        # so recall and the startup backfill rank on the same words.
-        embedding = await self._embed_message(content)
-        attachments = self._resolve_media(attachments, content, embedding, media_ids)
+        if prepared_media is None:
+            prepared_media = await self.prepare_response_media(content, attachments, media_ids)
+        if before_send is not None:
+            before_send()
         message_id, external_id = await self._log_and_send(
             recipient,
             content,
             prepared,
-            attachments,
+            prepared_media.attachments,
             quote_message,
             parent_id=parent_id,
-            embedding=embedding,
+            embedding=prepared_media.embedding,
             source_name=author,
             mechanism=mechanism,
             run_id=run_id,
         )
         logger.info("Sent response to %s (%d chars)", recipient, len(content))
         return message_id if external_id is not None else None
+
+    async def prepare_response_media(
+        self,
+        content: str,
+        attachments: list[str] | None = None,
+        media_ids: list[int] | None = None,
+    ) -> PreparedResponseMedia:
+        # The same embedding is stored in messagelog and used to select an image.
+        embedding = await self._embed_message(content)
+        return PreparedResponseMedia(
+            embedding, self._resolve_media(attachments, content, embedding, media_ids)
+        )
 
     def _device_for_outgoing(self, recipient: str) -> Device | None:
         """The device an outgoing send to ``recipient`` actually reaches.

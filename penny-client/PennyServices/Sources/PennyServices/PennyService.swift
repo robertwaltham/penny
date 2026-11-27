@@ -148,8 +148,14 @@ public final class PennyService {
     }
 
     public var supportsImageAttachmentSettings: Bool {
-        hasLoadedRuntimeConfig && ImageAttachmentSetting.allCases.allSatisfy { setting in
-            runtimeConfigParams.contains { $0.key == setting.rawValue && ["0", "1"].contains($0.value) }
+        ImageAttachmentSetting.allCases.allSatisfy { setting in
+            setting.requiresServerConfiguration || isImageAttachmentSettingAvailable(setting)
+        }
+    }
+
+    public func isImageAttachmentSettingAvailable(_ setting: ImageAttachmentSetting) -> Bool {
+        hasLoadedRuntimeConfig && runtimeConfigParams.contains {
+            $0.key == setting.rawValue && ["0", "1"].contains($0.value)
         }
     }
 
@@ -432,9 +438,17 @@ extension PennyService {
 
     public func updateImageAttachmentSetting(_ setting: ImageAttachmentSetting, enabled: Bool) {
         guard canSend, supportsImageAttachmentSettings,
+              isImageAttachmentSettingAvailable(setting),
               imageAttachmentSettings.pendingSetting == nil else { return }
         let requestID = imageAttachmentSettings.begin(setting, enabled: enabled)
         send(.configUpdate(key: setting.rawValue, value: enabled ? "1" : "0", requestID: requestID))
+    }
+
+    func applyConfigResponse(_ payload: ConfigResponsePayload) {
+        if imageAttachmentSettings.receive(payload) {
+            runtimeConfigParams = payload.params
+            hasLoadedRuntimeConfig = true
+        }
     }
 
     public func requestPromptLogs(
@@ -698,10 +712,7 @@ extension PennyService {
         case .agentProgress(let payload):
             applyAgentProgress(payload)
         case .configResponse(let payload):
-            if imageAttachmentSettings.receive(payload) {
-                runtimeConfigParams = payload.params
-                hasLoadedRuntimeConfig = true
-            }
+            applyConfigResponse(payload)
         case .promptLogsResponse(let payload):
             if payload.runs.isEmpty || promptLogRuns.isEmpty {
                 promptLogRuns = payload.runs

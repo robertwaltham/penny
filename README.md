@@ -121,7 +121,42 @@ Penny uses up to three LLM model roles, all running locally by default:
 | **Embedding** | `LLM_EMBEDDING_MODEL` | Embeddings for knowledge retrieval, message similarity, and preference dedup | Yes |
 | **Image** | `LLM_IMAGE_MODEL` | Image generation (ask Penny to draw — the `generate_image` tool) | Optional |
 
-Text and embedding go through the OpenAI SDK and can each point at a different OpenAI-compatible endpoint via the corresponding `LLM_*_API_URL` / `LLM_*_API_KEY` overrides — useful when running text on one machine and embeddings on another. Image generation is the one exception: it talks to Ollama's `/api/generate` endpoint directly (set `LLM_IMAGE_API_URL`), because there's no OpenAI-compatible image generation protocol that works with local models. A photo sent in chat rides the chat turn's own user message to the text model, so `LLM_MODEL` must understand images.
+Text and embedding go through the OpenAI SDK and can point at different OpenAI-compatible endpoints via the corresponding `LLM_*_API_URL` and `LLM_*_API_KEY` overrides. Text-to-image generation uses the local [mflux image server](image_server/README.md) at `LLM_IMAGE_API_URL`. A photo sent in chat goes to the text model with the user's message, so `LLM_MODEL` must understand images.
+
+### ComfyUI image editing
+
+The optional server-side `edit_image` tool runs the DungeonsAndLlamas FLUX.2 Klein 4B
+distilled workflows. Set `COMFYUI_ENABLED=true`, `COMFYUI_URL` (HTTPS),
+`COMFYUI_USERNAME`, and `COMFYUI_PASSWORD` in Penny's server environment.
+Set `COMFYUI_IMAGE_DIR` to a dedicated directory writable by Penny. Under Docker,
+`./data/comfyui/images` on the host is visible as `/penny/data/comfyui/images`.
+
+Set one or both workflow paths to the corresponding DungeonsAndLlamas API-format JSON
+files, using paths visible to the server.
+
+- `COMFYUI_WORKFLOW_ONE_IMAGE` → `image_flux2_klein_image_edit_4b_distilled.json`
+- `COMFYUI_WORKFLOW_TWO_IMAGE` → `image_flux2_klein_2_image_edit_4b_distilled.json`
+
+Place the input files in the image directory before invoking the tool. Pass one
+or two relative paths in order, with the main input first and the reference second.
+The image directory supports PNG, JPEG, and WebP inputs up to 32 MiB each. The
+generated PNG is saved under `outputs/` in that directory, and the tool returns
+its relative path.
+
+```json
+{
+  "description": "Restyle the handbag using the colors from the reference",
+  "input_images": ["handbag.png", "colors.jpg"]
+}
+```
+
+With the one-image workflow configured, **Edit scheduled report images** is
+available under **Settings → Image Attachments**. This shared setting is off by
+default and can also be set with `/config SCHEDULED_REPORT_IMAGE_EDITING 1`.
+Penny summarizes each finished scheduled report with a selected image into a
+visual prompt and uses it to edit that attachment. Other scheduled work can
+proceed while ComfyUI runs. If the edit fails or times out, Penny sends the
+original image with the report.
 
 ### Scheduling
 
@@ -281,8 +316,8 @@ LLM_API_URL="http://host.docker.internal:11434/v1"
 LLM_MODEL="gpt-oss:20b"                   # Single model for all agents — reads photo attachments in chat
 # LLM_API_KEY="not-needed"                # Default fine for unauthenticated local backends
 LLM_EMBEDDING_MODEL="embeddinggemma"      # Required — backs memory (preference dedup + similarity recall)
-# LLM_IMAGE_MODEL="x/z-image-turbo"       # Optional, enables the generate_image tool (uses LLM_IMAGE_API_URL)
-# LLM_IMAGE_API_URL="http://host.docker.internal:11434"  # Ollama REST for image generation
+# LLM_IMAGE_MODEL="flux2-klein-4b"       # Optional, enables the generate_image tool
+# LLM_IMAGE_API_URL="http://host.docker.internal:8765"  # Local mflux image server
 
 # Database & Logging
 DB_PATH="/penny/data/penny/penny.db"
@@ -323,8 +358,8 @@ Penny auto-detects which channel to use based on configured credentials:
 - `LLM_EXTRA_HEADERS`: Extra HTTP headers sent on every LLM API request, as a JSON object (default: none). For endpoint-specific switches — e.g., `{"X-Tosh-Agent": "off"}` bypasses ToshLLM's server-side agent so Penny keeps control of the agent loop and tool calls
 - `LLM_EMBEDDING_MODEL`: **Required.** Dedicated embedding model (e.g., `embeddinggemma`) that backs preference/knowledge/message embeddings — Penny fails fast at startup if it is unset
 - `LLM_EMBEDDING_API_URL` / `LLM_EMBEDDING_API_KEY`: Override API URL/key for the embedding model
-- `LLM_IMAGE_MODEL`: Image generation model (e.g., `x/z-image-turbo`). Optional; enables the `generate_image` chat tool (ask Penny to draw). Image generation is the one non-OpenAI endpoint — it talks to Ollama's `/api/generate` directly
-- `LLM_IMAGE_API_URL`: Ollama REST endpoint for image generation (default: `http://host.docker.internal:11434`)
+- `LLM_IMAGE_MODEL` specifies the model served by the local mflux server, such as `flux2-klein-4b`, and enables the `generate_image` tool.
+- `LLM_IMAGE_API_URL` points to the mflux image server and defaults to `http://host.docker.internal:8765`.
 
 **API Keys:**
 - `FASTMAIL_API_TOKEN`: enables the email tools on the chat surface (Fastmail)

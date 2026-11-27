@@ -45,6 +45,7 @@ public enum AXID {
     /// The leading page menu (#3111) — closed, its label is the current
     /// page's icon; open, a `Picker` row per page.
     public static let pageMenu = "shell.page.menu"
+    public static func imageAttachmentSetting(_ key: String) -> String { "settings.imageAttachment.\(key)" }
 
     /// The composer's text field.
     public static let composerTextField = "composer.textField"

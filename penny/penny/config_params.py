@@ -21,8 +21,10 @@ GROUP_MEMORY = "Memory"
 GROUP_BROWSE = "Browse"
 GROUP_SEND = "Send"
 GROUP_EMAIL = "Email"
-GROUP_IOS_ATTACHMENTS = "iOS Attachments"
+GROUP_IMAGE_ATTACHMENTS = "Image Attachments"
 GROUP_TOKEN_BUDGETS = "Token budgets"
+
+SCHEDULED_REPORT_IMAGE_EDITING = "SCHEDULED_REPORT_IMAGE_EDITING"
 
 # Ordered list for display
 CONFIG_GROUPS: list[str] = [
@@ -32,7 +34,7 @@ CONFIG_GROUPS: list[str] = [
     GROUP_BROWSE,
     GROUP_SEND,
     GROUP_EMAIL,
-    GROUP_IOS_ATTACHMENTS,
+    GROUP_IMAGE_ATTACHMENTS,
     GROUP_TOKEN_BUDGETS,
 ]
 
@@ -53,19 +55,35 @@ class ConfigParam:
     # Closed value set, when the param has one — the browser addon renders a
     # toggle or segmented editor from it instead of a free-text input (#2569).
     choices: tuple[str, ...] = ()
+    requires_configuration: bool = False
 
     def __post_init__(self) -> None:
         RUNTIME_CONFIG_PARAMS[self.key] = self
 
 
-def get_params_by_group() -> list[tuple[str, list[ConfigParam]]]:
+def get_runtime_param(key: str, runtime: RuntimeParams | None) -> ConfigParam | None:
+    """Look up a setting supported by this deployment."""
+    param = RUNTIME_CONFIG_PARAMS.get(key)
+    if (
+        param is not None
+        and param.requires_configuration
+        and (runtime is None or not runtime.is_configured(key))
+    ):
+        return None
+    return param
+
+
+def get_params_by_group(
+    runtime: RuntimeParams | None = None,
+) -> list[tuple[str, list[ConfigParam]]]:
     """Return params grouped by category in display order.
 
     Within each group, params are sorted alphabetically by key.
     """
     groups: dict[str, list[ConfigParam]] = {g: [] for g in CONFIG_GROUPS}
     for param in RUNTIME_CONFIG_PARAMS.values():
-        groups[param.group].append(param)
+        if get_runtime_param(param.key, runtime) is not None:
+            groups[param.group].append(param)
     return [(g, sorted(groups[g], key=lambda p: p.key)) for g in CONFIG_GROUPS if groups[g]]
 
 
@@ -524,8 +542,19 @@ for _key, _description in (
         default=1,
         validator=_validate_switch,
         choices=_SWITCH_CHOICES,
-        group=GROUP_IOS_ATTACHMENTS,
+        group=GROUP_IMAGE_ATTACHMENTS,
     )
+
+ConfigParam(
+    key=SCHEDULED_REPORT_IMAGE_EDITING,
+    description="Edit selected image attachments for scheduled collection reports with ComfyUI",
+    type=int,
+    default=0,
+    validator=_validate_switch,
+    choices=_SWITCH_CHOICES,
+    group=GROUP_IMAGE_ATTACHMENTS,
+    requires_configuration=True,
+)
 
 # ── Token budgets — one per model-call kind (#2474) ──────────────────────────
 #
@@ -590,11 +619,24 @@ class RuntimeParams:
     ) -> None:
         self._db = db
         self._env_overrides = env_overrides or {}
+        self._configured_params: set[str] = set()
+
+    def set_configured(self, key: str, configured: bool) -> None:
+        if configured:
+            self._configured_params.add(key)
+        else:
+            self._configured_params.discard(key)
+
+    def is_configured(self, key: str) -> bool:
+        return key in self._configured_params
 
     def __getattr__(self, name: str) -> Any:
         key = name.upper()
-        if key not in RUNTIME_CONFIG_PARAMS:
+        param = RUNTIME_CONFIG_PARAMS.get(key)
+        if param is None:
             raise AttributeError(f"No runtime config param: {name}")
+        if param.requires_configuration and not self.is_configured(key):
+            return param.default
 
         # 1. Check database
         if self._db is not None:
@@ -607,7 +649,7 @@ class RuntimeParams:
             return self._env_overrides[key]
 
         # 3. Fall back to default
-        return RUNTIME_CONFIG_PARAMS[key].default
+        return param.default
 
     def _get_db_value(self, key: str) -> Any:
         """Look up a runtime config override from the database."""

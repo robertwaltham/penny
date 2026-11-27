@@ -105,7 +105,7 @@ from penny.channels.ios.models import (
 )
 from penny.channels.permission_manager import PermissionManager
 from penny.channels.turns import TurnRegistry
-from penny.config_params import RUNTIME_CONFIG_PARAMS, get_params_by_group
+from penny.config_params import RUNTIME_CONFIG_PARAMS, get_params_by_group, get_runtime_param
 from penny.constants import ChannelType, PennyConstants, PermissionResolution
 from penny.database.media_store import ImageSelectionPolicy
 from penny.database.memory import (
@@ -465,11 +465,10 @@ class IosChannel(MessageChannel):
     ) -> None:
         """Return all runtime config params with current values."""
         params = []
-        for group, group_params in get_params_by_group():
+        runtime = self._config.runtime if self._config else None
+        for group, group_params in get_params_by_group(runtime):
             for param in group_params:
-                current = (
-                    getattr(self._config.runtime, param.key) if self._config else param.default
-                )
+                current = getattr(runtime, param.key) if runtime is not None else param.default
                 params.append(
                     {
                         "key": param.key,
@@ -494,7 +493,8 @@ class IosChannel(MessageChannel):
         except ValidationError:
             logger.warning("Invalid config_update: %s", str(data)[:200])
             return
-        param = RUNTIME_CONFIG_PARAMS.get(req.key)
+        runtime = self._config.runtime if self._config else None
+        param = get_runtime_param(req.key, runtime)
         if not param:
             logger.warning("Unknown config key: %s", req.key)
             await self._handle_config_request(

@@ -195,7 +195,8 @@ struct ImageAttachmentSettingsViewModelTests {
         transport.emit(imageConfigJSON())
         #expect(viewModel.imageSettingsStatus == nil)
         #expect(viewModel.runtimeConfigParams.isEmpty)
-        #expect(ImageAttachmentSetting.allCases.allSatisfy { viewModel.canEditImageSetting($0) })
+        #expect(!viewModel.visibleImageSettings.contains(.scheduledReportEditing))
+        #expect(viewModel.visibleImageSettings.allSatisfy { viewModel.canEditImageSetting($0) })
         transport.clearSentPayloads()
         viewModel.setImageSetting(.automatic, enabled: false)
         #expect(!viewModel.imageSettingValue(.automatic))
@@ -218,13 +219,56 @@ struct ImageAttachmentSettingsViewModelTests {
         #expect(!viewModel.canEditImageSetting(.automatic))
         #expect(client.imageAttachmentSettings.error != nil)
     }
+
+    @Test func scheduledReportEditingAppearsAndSavesWhenConfigured() async throws {
+        let prefs = configuredPrefs()
+        let (client, transport) = makeAdminClient(prefs: prefs)
+        let viewModel = SettingsViewModel(client: client, prefs: prefs)
+        await connectAndClearStartupFrames(client, transport)
+        transport.emit("""
+        {"type":"registered","device_id":"device","is_default":true,"pending_count":0}
+        """)
+        _ = await sentPayloads(transport, count: 2)
+        let setting = ImageAttachmentSetting.scheduledReportEditing
+        transport.emit(imageConfigJSON())
+        viewModel.setImageSetting(setting, enabled: true)
+        #expect(!viewModel.visibleImageSettings.contains(setting))
+        #expect(client.imageAttachmentSettings.pendingSetting == nil)
+
+        transport.emit(imageConfigJSON(scheduledReportEditing: "0"))
+        #expect(viewModel.visibleImageSettings.contains(setting))
+        #expect(viewModel.canEditImageSetting(setting))
+        #expect(!viewModel.imageSettingValue(setting))
+        transport.clearSentPayloads()
+        viewModel.setImageSetting(setting, enabled: true)
+        let payloads = await sentPayloads(transport, count: 1)
+        let payload = try #require(payloads.first)
+        #expect(payload["key"] == .string(setting.rawValue))
+        #expect(payload["value"] == .string("1"))
+        guard case .string(let identifier)? = payload["request_id"] else {
+            Issue.record("Missing image update correlation")
+            return
+        }
+        transport.emit(imageConfigJSON(requestID: identifier, scheduledReportEditing: "1"))
+        #expect(viewModel.imageSettingValue(setting))
+        #expect(client.imageAttachmentSettings.pendingSetting == nil)
+    }
 }
 
-private func imageConfigJSON(requestID: String? = nil, automatic: String = "1") -> String {
-    let params = ImageAttachmentSetting.allCases.map { setting in
-        """
-        {"key":"\(setting.rawValue)","value":"\(setting == .automatic ? automatic : "1")",
-        "default":"1","description":"Image setting","type":"int","group":"iOS Attachments"}
+private func imageConfigJSON(
+    requestID: String? = nil, automatic: String = "1", scheduledReportEditing: String? = nil
+) -> String {
+    let params = ImageAttachmentSetting.allCases.compactMap { setting -> String? in
+        let value = switch setting {
+        case .automatic: automatic
+        case .scheduledReportEditing: scheduledReportEditing
+        default: "1"
+        }
+        guard let value else { return nil }
+        return """
+        {"key":"\(setting.rawValue)","value":"\(value)",
+        "default":"\(setting.requiresServerConfiguration ? "0" : "1")",
+        "description":"Image setting","type":"int","group":"Image Attachments"}
         """
     }.joined(separator: ",")
     let correlation = requestID.map { ",\"request_id\":\"\($0)\"" } ?? ""

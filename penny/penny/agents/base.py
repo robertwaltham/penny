@@ -2068,14 +2068,9 @@ class Agent:
 
         self._collect_tool_results(pending, results, messages, records, source_urls)
 
-        # A successful MUTATING call changes the world, so every previously-seen call is
-        # forgettable — an identical call against an UNCHANGED world is what the dedup
-        # guard exists to block, and a mutation means the world is no longer unchanged.
-        # Clearing the seen-calls cache on any mutation lets a legitimate repeat RUN in
-        # BOTH directions (#1673): retry-after-remediation (a failed write retried once
-        # its precondition was created) and re-read-after-write (verifying the entry just
-        # written).  Loop-safe: a repeat with no mutation since its prior occurrence
-        # never clears the cache, so it stays blocked.
+        # A mutation invalidates the ordinary cache, allowing retry-after-remediation
+        # and re-read-after-write (#1673). Tools that opt into successful-call
+        # deduplication still have their results in the turn's records.
         if any(record.mutated for record in records):
             called_tools.clear()
 
@@ -2101,11 +2096,10 @@ class Agent:
         even for a call that failed, and made the model narrate a write that never
         happened).
 
-        A repeat only reaches here while its call is still in ``called_tools``; a
-        successful MUTATING call empties that cache (in ``_process_tool_calls``), so a
-        legitimate retry-after-remediation or re-read-after-write RUNS the next time it
-        appears rather than being blocked (#1673).  Mutates ``called_tools`` and
-        ``messages``.
+        Mutations clear ``called_tools`` so a failed call can be retried after
+        remediation and a read can observe the new state (#1673). Tools with
+        ``deduplicate_successful_calls`` also check the turn's records for a
+        successful identical call whose result can still be reused.
         """
         pending: list[tuple[str, str, dict]] = []
         for tool_call in response.message.tool_calls or []:
@@ -2118,12 +2112,17 @@ class Agent:
             arguments.pop(PennyConstants.STRAY_REASONING_ARG_KEY, None)
             call_key = self._make_call_key(tool_name, arguments)
 
-            if not self.allow_repeat_tools and call_key in called_tools:
-                logger.info("Skipping repeat: %s(%s)", tool_name, arguments)
+            cached = call_key in called_tools
+            tool = self._tool_registry.get(tool_name)
+            if not self.allow_repeat_tools and (
+                cached or (tool and tool.deduplicate_successful_calls)
+            ):
                 prior_index = self._last_matching_index(call_key, prior_records)
                 prior = prior_records[prior_index] if prior_index is not None else None
-                self._append_duplicate_rejection(tool_call_id, tool_name, prior, messages)
-                continue
+                if cached or (prior is not None and not prior.failed):
+                    logger.info("Skipping repeat: %s(%s)", tool_name, arguments)
+                    self._append_duplicate_rejection(tool_call_id, tool_name, prior, messages)
+                    continue
 
             called_tools.add(call_key)
             pending.append((tool_call_id, tool_name, arguments))
@@ -2133,15 +2132,7 @@ class Agent:
     def _last_matching_index(
         call_key: tuple[str, ...], records: list[ToolCallRecord]
     ) -> int | None:
-        """Index of the most recent EXECUTED record matching this call key, or None.
-
-        The blocked repeat's prior occurrence is the record that last put this key in
-        the cache (the cache clears on mutation, so a still-cached key was admitted
-        since the last clear).  Scans newest-first so the OUTCOME rendered into the
-        rejection frame (#1673) is that latest occurrence's.  ``None`` when no record
-        matches — a within-step duplicate admitted earlier in the current
-        (still-executing) batch, whose outcome isn't known yet.
-        """
+        """Index of the most recent executed record for this key, if any."""
         for index in range(len(records) - 1, -1, -1):
             if Agent._make_call_key(records[index].tool, records[index].arguments) == call_key:
                 return index

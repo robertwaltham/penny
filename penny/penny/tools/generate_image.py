@@ -51,6 +51,7 @@ class GenerateImageTool(Tool):
     """Generate an image from a text description and deliver it to the user."""
 
     name = "generate_image"
+    deduplicate_successful_calls = True
     description = (
         "Generate an image from a text description.  Use this when the user asks "
         "you to draw, paint, sketch, or make a picture/image of something.  Pass "
